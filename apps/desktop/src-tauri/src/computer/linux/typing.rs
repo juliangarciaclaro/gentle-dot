@@ -57,7 +57,7 @@ pub fn combo_batch(combo: &KeyCombo) -> Result<Batch, String> {
 }
 
 /// The batches that type `text`: one per keymap-sized run of characters, with newlines and tabs
-/// sent as Return and Tab. Any other control character is an error, before anything is sent.
+/// (CRLF and CR too) sent as Return and Tab. Any other control character is an error, before anything is sent.
 pub fn text_batches(text: &str) -> Result<Vec<Batch>, String> {
     let named = |key: &str| -> Result<Batch, String> {
         let code = evdev::key_code(key).ok_or_else(|| format!("no key code for `{key}`"))?;
@@ -72,11 +72,16 @@ pub fn text_batches(text: &str) -> Result<Vec<Batch>, String> {
         }
         Ok(())
     };
-    for (at, c) in text.char_indices() {
-        if c == '\n' || c == '\t' {
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        // "\r\n" and a lone "\r" are one newline, as in the other backends.
+        if c == '\r' && chars.peek().is_some_and(|&(_, next)| next == '\n') {
             flush(&text[run_start..at], &mut batches)?;
-            batches.push(named(if c == '\n' { "return" } else { "tab" })?);
-            run_start = at + c.len_utf8();
+            run_start = at + 1;
+        } else if c == '\n' || c == '\r' || c == '\t' {
+            flush(&text[run_start..at], &mut batches)?;
+            batches.push(named(if c == '\t' { "tab" } else { "return" })?);
+            run_start = at + 1;
         } else if c.is_control() {
             return Err(format!("cannot type control character U+{:04X}", c as u32));
         }
@@ -134,6 +139,11 @@ mod tests {
         assert_eq!(batches[3].steps, [key(15, true), key(15, false)]);
         assert_eq!(batches[0].steps.len(), 4);
         assert_eq!(text_batches("\n").unwrap().len(), 1);
+        // CRLF and a lone CR are one Return, as everywhere else.
+        for text in ["\r\n", "\r", "a\r\nb"] {
+            let returns = text_batches(text).unwrap().iter().filter(|b| b.steps == [key(28, true), key(28, false)]).count();
+            assert_eq!(returns, 1, "{text:?}");
+        }
     }
 
     #[test]

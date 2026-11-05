@@ -5,7 +5,7 @@
 //! arrive; callers ask it to act through a channel and never wait longer than `TIMEOUT`.
 
 use super::pointer::Rect;
-use super::toplevels::{OutputInfo, WindowInfo};
+use super::toplevels::{OutputInfo, Settle, WindowInfo};
 use super::typing::KeyStep;
 use cosmic_protocols::toplevel_info::v1::client::{zcosmic_toplevel_handle_v1, zcosmic_toplevel_info_v1};
 use cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_v1;
@@ -87,7 +87,7 @@ struct State {
     manager: Option<zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1>,
     toplevels: Vec<TopEntry>,
     next_window: u32,
-    dirty: bool,
+    settle: Settle,
 }
 
 impl State {
@@ -106,7 +106,7 @@ impl State {
             manager: None,
             toplevels: Vec::new(),
             next_window: 1,
-            dirty: true,
+            settle: Settle::default(),
         }
     }
 
@@ -120,7 +120,7 @@ impl State {
         if self.keyboard.is_none() {
             if let (Some(manager), Some(seat)) = (&self.keyboard_manager, &self.seat) {
                 self.keyboard = Some(manager.create_virtual_keyboard(seat, &self.qh, ()));
-                self.dirty = true;
+                self.settle.changed();
             }
         }
         if let Some(info) = &self.info {
@@ -144,10 +144,20 @@ impl State {
 
     /// Copies what changed into `Shared`.
     fn publish(&mut self) {
-        if !self.dirty {
-            return;
+        if self.settle.take(Instant::now()) {
+            self.write();
         }
-        self.dirty = false;
+    }
+
+    /// Like `publish`, for when the compositor handled everything sent so far, so no batch can
+    /// still be half-applied.
+    fn publish_settled(&mut self) {
+        if self.settle.take_settled() {
+            self.write();
+        }
+    }
+
+    fn write(&mut self) {
         let outputs: Vec<OutputInfo> = self
             .outputs
             .iter()
@@ -296,11 +306,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     _ => return,
                 }
                 state.link();
-                state.dirty = true;
+                state.settle.changed();
             }
             wl_registry::Event::GlobalRemove { name } => {
                 state.outputs.retain(|o| o.name != name);
-                state.dirty = true;
+                state.settle.changed();
             }
             _ => {}
         }
@@ -309,11 +319,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
 
 impl Dispatch<wl_output::WlOutput, u32> for State {
     fn event(state: &mut Self, _: &wl_output::WlOutput, event: wl_output::Event, name: &u32, _: &Connection, _: &QueueHandle<Self>) {
-        if let wl_output::Event::Name { name: label } = event {
-            if let Some(output) = state.outputs.iter_mut().find(|o| o.name == *name) {
-                output.label = label;
-                state.dirty = true;
+        match event {
+            wl_output::Event::Name { name: label } => {
+                if let Some(output) = state.outputs.iter_mut().find(|o| o.name == *name) {
+                    output.label = label;
+                    state.settle.opened(Instant::now());
+                }
             }
+            wl_output::Event::Done => state.settle.closed(),
+            _ => {}
         }
     }
 }
@@ -325,9 +339,13 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, u32> for State {
             zxdg_output_v1::Event::LogicalPosition { x, y } => output.position = Some((x, y)),
             zxdg_output_v1::Event::LogicalSize { width, height } => output.size = Some((width, height)),
             zxdg_output_v1::Event::Name { name } if output.label.is_empty() => output.label = name,
+            zxdg_output_v1::Event::Done => {
+                state.settle.closed();
+                return;
+            }
             _ => return,
         }
-        state.dirty = true;
+        state.settle.opened(Instant::now());
     }
 }
 
@@ -354,7 +372,7 @@ impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for St
                 minimized: false,
                 frames: Vec::new(),
             });
-            state.dirty = true;
+            state.settle.opened(Instant::now());
         }
     }
 
@@ -376,6 +394,8 @@ impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> fo
         match event {
             Event::Closed => {
                 state.toplevels.retain(|t| t.ext.id() != handle.id());
+                state.settle.changed();
+                return;
             }
             Event::Title { title } => {
                 if let Some(top) = state.top_of_ext(handle) {
@@ -389,7 +409,7 @@ impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> fo
             }
             _ => return,
         }
-        state.dirty = true;
+        state.settle.opened(Instant::now());
     }
 }
 
@@ -403,7 +423,7 @@ impl Dispatch<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let zcosmic_toplevel_info_v1::Event::Done = event {
-            state.dirty = true;
+            state.settle.closed();
         }
     }
 
@@ -447,13 +467,16 @@ impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()> for State
             }
             _ => return,
         }
-        state.dirty = true;
+        state.settle.opened(Instant::now());
     }
 }
 
 impl Dispatch<wl_callback::WlCallback, Answer> for State {
-    fn event(_: &mut Self, _: &wl_callback::WlCallback, event: wl_callback::Event, answer: &Answer, _: &Connection, _: &QueueHandle<Self>) {
+    fn event(state: &mut Self, _: &wl_callback::WlCallback, event: wl_callback::Event, answer: &Answer, _: &Connection, _: &QueueHandle<Self>) {
         if let wl_callback::Event::Done { .. } = event {
+            // The compositor handled everything sent before, so the state is whole; publish it
+            // before the caller wakes and reads it.
+            state.publish_settled();
             let _ = answer.0.send(Ok(()));
         }
     }
@@ -566,7 +589,8 @@ fn run(
             return;
         }
     }
-    state.publish();
+    state.settle.changed();
+    state.publish_settled();
     let _ = ready.send(Ok(()));
     if let Err(error) = serve(&conn, &mut queue, &mut state, &inbox, &wake) {
         eprintln!("gentle-dot: the Wayland connection for computer control ended: {error}");

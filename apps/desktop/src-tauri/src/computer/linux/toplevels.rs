@@ -10,6 +10,7 @@ use super::pointer::Rect;
 use crate::computer::blocklist::{AppIdentity, UNIDENTIFIED};
 use crate::computer::coords::Point;
 use crate::computer::AppInfo;
+use std::time::{Duration, Instant};
 
 /// Title of the glow overlay window: it covers a whole output, click-through, so it never owns
 /// a point and is never the app in front.
@@ -171,6 +172,54 @@ pub fn output_for_capture<'a>(
 /// The output containing `at`.
 pub fn output_at(outputs: &[OutputInfo], at: Point) -> Option<&OutputInfo> {
     outputs.iter().find(|o| contains(&o.rect, at))
+}
+
+/// How long a batch of events may stay open before its state is published anyway, in case the
+/// compositor never sends the closing `done`.
+const BATCH_LIMIT: Duration = Duration::from_millis(250);
+
+/// Decides when what the compositor reported may be published: a change opens a batch that the
+/// compositor's `done` closes, and nothing is published while one is open, so a reader never
+/// sees a half-applied update.
+#[derive(Debug, Default)]
+pub struct Settle {
+    dirty: bool,
+    open_since: Option<Instant>,
+}
+
+impl Settle {
+    /// Something changed that stands alone.
+    pub fn changed(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Something changed that belongs to a batch the compositor has yet to close.
+    pub fn opened(&mut self, now: Instant) {
+        self.dirty = true;
+        self.open_since.get_or_insert(now);
+    }
+
+    /// The compositor closed the batch.
+    pub fn closed(&mut self) {
+        self.open_since = None;
+    }
+
+    /// Whether to publish now; true at most once per change.
+    pub fn take(&mut self, now: Instant) -> bool {
+        let open = self.open_since.is_some_and(|since| now.saturating_duration_since(since) < BATCH_LIMIT);
+        if !self.dirty || open {
+            return false;
+        }
+        self.dirty = false;
+        self.open_since = None;
+        true
+    }
+
+    /// Whether to publish regardless of an open batch: everything sent before is handled.
+    pub fn take_settled(&mut self) -> bool {
+        self.closed();
+        self.take(Instant::now())
+    }
 }
 
 #[cfg(test)]
@@ -375,5 +424,28 @@ mod tests {
         assert_eq!(id(output_for_capture(&[], None, None)), None);
         assert_eq!(id(output_at(&outputs, at(1919.0, 5.0))), Some(1));
         assert_eq!(id(output_at(&outputs, at(1920.0, 5.0))), Some(2));
+    }
+
+    #[test]
+    fn nothing_is_published_while_a_batch_is_open() {
+        let start = Instant::now();
+        let mut settle = Settle::default();
+        assert!(!settle.take(start));
+        settle.opened(start);
+        settle.opened(start);
+        assert!(!settle.take(start));
+        settle.closed();
+        assert!(settle.take(start));
+        assert!(!settle.take(start));
+        // A change that stands alone is published at once.
+        settle.changed();
+        assert!(settle.take(start));
+        // A batch the compositor never closes is published after the limit.
+        settle.opened(start);
+        assert!(!settle.take(start + BATCH_LIMIT / 2));
+        assert!(settle.take(start + BATCH_LIMIT));
+        // A forced publish ignores an open batch.
+        settle.opened(start);
+        assert!(settle.take_settled());
     }
 }
