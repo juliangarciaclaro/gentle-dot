@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { ConnectorInfo, ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import { computerSends } from "../src/connectors.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
@@ -370,5 +371,16 @@ describe("connectors next to the computer (regression)", () => {
 		send({ type: "connector_remove", connectorId: "notion" });
 		await waitFor(() => !servers().notion);
 		expect(Object.keys(servers())).toEqual(["computer"]);
+	});
+});
+
+describe("computer connector wording (S6)", () => {
+	it("names the Mac only on macOS", () => {
+		expect(computerSends("darwin")).toBe(
+			"Click, type, and open apps on this Mac during that session. The app asks you again before risky actions.",
+		);
+		expect(computerSends("linux")).toBe(
+			"Click, type, and open apps on this computer during that session. The app asks you again before risky actions.",
+		);
 	});
 });

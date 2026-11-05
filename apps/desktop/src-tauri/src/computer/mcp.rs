@@ -59,12 +59,18 @@ const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels 
 const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the action was refused. \
 Take a new screenshot and try again.";
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 const INSTRUCTIONS: &str = "Controls this Mac. Take a screenshot first; x and y are pixels of the latest \
 screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
 type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
 before deciding the next step. The user must allow a session, risky actions ask the user to confirm, and \
 some apps (System Settings, password managers) are off limits.";
+#[cfg(target_os = "linux")]
+const INSTRUCTIONS: &str = "Controls this computer. Take a screenshot first; x and y are pixels of the latest \
+screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
+type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
+before deciding the next step. Shortcuts use ctrl (cmd also presses Ctrl). The user must allow a session, \
+risky actions ask the user to confirm, and some apps (system settings, password managers) are off limits.";
 #[cfg(windows)]
 const INSTRUCTIONS: &str = "Controls this PC. Take a screenshot first; x and y are pixels of the latest \
 screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
@@ -73,8 +79,11 @@ before deciding the next step. Shortcuts use ctrl (cmd also presses Ctrl). The u
 risky actions ask the user to confirm, and some apps (Settings, Windows Security, password managers) are off limits.";
 
 /// Why computer control is unavailable when the system cannot take its screenshots.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 const SCREENSHOTS_UNSUPPORTED: &str = "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.";
+#[cfg(target_os = "linux")]
+const SCREENSHOTS_UNSUPPORTED: &str =
+    "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer.";
 #[cfg(windows)]
 const SCREENSHOTS_UNSUPPORTED: &str =
     "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC.";
@@ -100,18 +109,23 @@ fn screenshots_unsupported(reason: Option<ScreenshotsUnsupported>) -> &'static s
 const KEY_RECIPIENT_CHANGED: &str = "The app receiving the keys changed before the key was sent, so it was not sent.";
 
 /// The `key` and `open_app` tool descriptions, and the system an `open_app` confirmation names.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 const KEY_DESCRIPTION: &str = "Press a key combo in the frontmost app, for example `shift+cmd+t`, `return`, or `esc`.";
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const KEY_DESCRIPTION: &str =
     "Press a key combo in the frontmost app, for example `ctrl+shift+t`, `return`, or `esc` (`cmd` presses Ctrl).";
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 const OPEN_APP_DESCRIPTION: &str = "Open or bring forward an app by name or bundle id.";
+#[cfg(target_os = "linux")]
+const OPEN_APP_DESCRIPTION: &str =
+    "Open or bring forward an app by name (as the app launcher shows it) or by its desktop entry id.";
 #[cfg(windows)]
 const OPEN_APP_DESCRIPTION: &str =
     "Open or bring forward an app by name (as the Start menu shows it) or by the path of its program (.exe).";
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 const SYSTEM: &str = "macOS";
+#[cfg(target_os = "linux")]
+const SYSTEM: &str = "Linux";
 #[cfg(windows)]
 const SYSTEM: &str = "Windows";
 
@@ -1388,8 +1402,13 @@ mod tests {
         rig.desktop.permissions.lock().unwrap().screenshots_supported = false;
         let result = rig.call("screenshot", json!({}));
         assert!(is_error(&result));
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
+        );
         #[cfg(windows)]
         assert_eq!(
             first_text(&result),
@@ -1407,8 +1426,13 @@ mod tests {
         }
         let result = rig.call("screenshot", json!({}));
         assert!(is_error(&result));
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
+        );
         #[cfg(windows)]
         assert_eq!(
             first_text(&result),
@@ -1427,8 +1451,13 @@ mod tests {
         }
         let result = rig.call("screenshot", json!({}));
         assert!(is_error(&result));
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
+        );
         #[cfg(windows)]
         assert_eq!(
             first_text(&result),

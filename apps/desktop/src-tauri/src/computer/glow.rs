@@ -106,7 +106,7 @@ pub fn place(
 }
 
 /// Convert physical-pixel marks to the overlay page's CSS pixels.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 pub fn in_css_pixels(event: GlowEvent, scale: f64) -> GlowEvent {
     if !scale.is_finite() || scale <= 0.0 || scale == 1.0 { return event; }
     let css = |value: f64| value / scale;

@@ -103,9 +103,9 @@ impl working::Windows for ShellWindows {
 
     fn show(&self, part: Part) {
         let Some(window) = self.get(part) else { return };
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         let shown = computer::show_without_focus(&window);
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         let shown = window.show().map_err(err);
         if let Err(error) = shown {
             eprintln!("gentle-dot: cannot show the {part:?} again: {error}");
@@ -806,10 +806,10 @@ fn restart_daemon(app: AppHandle) {
     });
 }
 
-/// The panic shortcut (⌥⇧Esc on macOS, Alt+Shift+Esc on Windows) ends computer control from
-/// anywhere, even while another app is in front. When another app or the system already holds it,
-/// the user is told once and the yolo dialog stops promising it; Stop keeps working.
-#[cfg(any(target_os = "macos", windows))]
+/// The panic shortcut (⌥⇧Esc on macOS, Alt+Shift+Esc on Windows and Linux) ends computer control
+/// from anywhere, even while another app is in front. When another app or the system already holds
+/// it, the user is told once and the yolo dialog stops promising it; Stop keeps working.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 fn register_panic_shortcut(app: &AppHandle) {
     let handler = |app: &AppHandle, _: &_, event: tauri_plugin_global_shortcut::ShortcutEvent| {
         if event.state() == ShortcutState::Pressed {
@@ -947,7 +947,7 @@ pub fn run() {
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
             app.manage(voice_model);
-            #[cfg(any(target_os = "macos", windows))]
+            #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
             register_panic_shortcut(&handle);
 
             build_windows(&handle, &config, places_windows, rose_hidden)?;

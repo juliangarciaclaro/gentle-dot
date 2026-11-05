@@ -349,12 +349,17 @@ export const COMPUTER_ID = "computer";
  */
 const CALL_TIMEOUT_SECONDS = 300;
 
+/** What the computer connector sends, naming the machine as the platform calls it (S6). */
+export function computerSends(platform: NodeJS.Platform): string {
+	const machine = platform === "darwin" ? "this Mac" : "this computer";
+	return `Click, type, and open apps on ${machine} during that session. The app asks you again before risky actions.`;
+}
+
 const COMPUTER_INFO = {
 	id: COMPUTER_ID,
 	name: "Computer",
 	reads: "See your screen during a session you allow in the app.",
-	sends:
-		"Click, type, and open apps on this Mac during that session. The app asks you again before risky actions.",
+	sends: computerSends(process.platform),
 } as const;
 
 /** A server the user added from the assistant's draft or an import. */
