@@ -2,8 +2,9 @@
 //! agent can see and drive the Mac. Every rule (session grant, blocklist, rate limit, risky
 //! action confirmation, panic stop) lives here, outside the agent's reach.
 //!
-//! The rules are pure modules tested on every OS. `Desktop` is the seam to the real Mac
-//! (`macos`), and `fake` records events for the tests. Off macOS the helper does not start.
+//! The rules are pure modules tested on every OS. `Desktop` is the seam to the real desktop
+//! (`macos`, `win`, `linux`), and `fake` records events for the tests. On any other OS the
+//! helper does not start.
 
 pub mod app;
 pub mod blocklist;
@@ -38,8 +39,9 @@ pub mod winapps;
 pub mod winput;
 pub mod working;
 
-// Windows capture ordering, kept platform-independent so CI exercises the contract.
-#[cfg(any(windows, test))]
+// Capture ordering (Windows and Linux), kept platform-independent so CI exercises the contract.
+#[cfg(any(windows, target_os = "linux", test))]
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 mod capture_order {
     pub(super) fn capture<T>(flush: impl FnOnce() -> Result<(), String>, grab: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         flush()?;
@@ -168,6 +170,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "macos")]
 pub use macos::{request_permission, MacDesktop};
+#[cfg(target_os = "linux")]
+pub use linux::{request_permission, CaptureGuard, LinuxDesktop, Pointer, OVERLAY_GONE};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +306,7 @@ pub struct KeyboardRecipient {
     pub focused_pid: Option<i32>,
 }
 
-/// The Mac, as the helper sees it.
+/// The desktop, as the helper sees it.
 pub trait Desktop: Send + Sync {
     /// Why keyboard input must not go to `app` on this platform (an elevated app on Windows, which
     /// silently drops input from Gentle Dot), or none.

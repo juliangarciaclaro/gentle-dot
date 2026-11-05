@@ -25,7 +25,7 @@ libc = "0.2"
 getrandom = "0.3"
 base64 = "0.22"
 tiny_http = "0.12"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # The optional local voice model (S30.5): Parakeet through sherpa-onnx, linked statically (its
 # build script downloads the prebuilt static libraries from the sherpa-onnx GitHub release unless
 # SHERPA_ONNX_LIB_DIR or SHERPA_ONNX_ARCHIVE_DIR points at a local copy). The model itself is
@@ -68,6 +68,13 @@ core-foundation = "0.10"
 dbus-secret-service = "4.1"
 # The approval dialog (S5): a GTK dialog on the main thread, the `gtk` that tauri and tao already link.
 gtk = "0.18"
+# Computer control (S2): our own Wayland client for COSMIC (outputs, toplevels, activation, the
+# virtual keyboard), and the screenshot portal over D-Bus (`zbus` blocking, already in the lock).
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+cosmic-protocols = { version = "0.2", default-features = false, features = ["client"] }
+zbus = "5"
 
 # The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
