@@ -14,6 +14,9 @@ pub mod glow;
 #[cfg(test)]
 mod fake;
 pub mod keys;
+// The Linux desktop's pure parts, tested everywhere; the backend joins them under `linux`.
+#[cfg(any(target_os = "linux", test))]
+pub mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod mcp;
