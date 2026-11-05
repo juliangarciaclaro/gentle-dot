@@ -6,6 +6,7 @@
 //! with a Wayland client and the screenshot portal on Linux.
 
 pub mod apps;
+pub mod atspi;
 pub mod desktop_entry;
 pub mod evdev;
 pub mod keymap;

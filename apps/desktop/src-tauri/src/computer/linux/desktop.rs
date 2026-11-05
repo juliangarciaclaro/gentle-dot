@@ -4,10 +4,11 @@
 //! is in front or under a point fails closed when the compositor does not say.
 
 use super::apps::Catalog;
+use super::atspi::Atspi;
 use super::portal::Portal;
 use super::session::{self, Session};
 use super::wayland::Client;
-use super::{desktop_entry, shot, toplevels, typing};
+use super::{atspi, desktop_entry, shot, toplevels, typing};
 use crate::computer::blocklist::AppIdentity;
 use crate::computer::coords::Point;
 use crate::computer::glow::Frame;
@@ -62,6 +63,8 @@ pub struct LinuxDesktop {
     enabling: Mutex<()>,
     last_pointer: Mutex<Option<Point>>,
     guard: Mutex<Option<Arc<dyn CaptureGuard>>>,
+    /// Accessibility (AT-SPI) for the risk checks.
+    atspi: Atspi,
     own_pid: i32,
 }
 
@@ -92,6 +95,7 @@ impl LinuxDesktop {
             enabling: Mutex::new(()),
             last_pointer: Mutex::new(None),
             guard: Mutex::new(None),
+            atspi: Atspi::default(),
             own_pid: std::process::id() as i32,
         }
     }
@@ -242,6 +246,8 @@ impl Desktop for LinuxDesktop {
         let (outputs, windows) = self.snapshot()?;
         let output = toplevels::output_for_capture(&outputs, self.pointer_position(), toplevels::frontmost(&windows))
             .ok_or("no screen is known")?;
+        // A session starts with a look at the screen: the toolkits get time to expose themselves.
+        self.atspi.enable();
         let guard = self.guard.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let png = super::super::capture_order::capture(
             || guard.as_ref().map_or(Ok(()), |guard| guard.hide()),
@@ -298,12 +304,21 @@ impl Desktop for LinuxDesktop {
         self.launch(id, entry)
     }
 
-    fn element_at(&self, _at: Point) -> Vec<AxElement> {
-        Vec::new()
+    fn element_at(&self, at: Point) -> Vec<AxElement> {
+        let Ok((outputs, windows)) = self.snapshot() else { return Vec::new() };
+        let Some(owner) = toplevels::owner_at(&windows, &outputs, at) else { return Vec::new() };
+        let Some(point) = atspi::window_point((at.x, at.y), &toplevels::global_rects(owner, &outputs)) else {
+            return Vec::new();
+        };
+        self.atspi.enable();
+        self.atspi.element_at(&owner.title, owner.activated, point)
     }
 
     fn focused_element(&self) -> Option<Focus> {
-        None
+        let (_, windows) = self.snapshot().ok()?;
+        let front = toplevels::frontmost(&windows)?;
+        self.atspi.enable();
+        self.atspi.focused(&front.title)
     }
 
     fn frontmost_app(&self) -> Option<AppIdentity> {
