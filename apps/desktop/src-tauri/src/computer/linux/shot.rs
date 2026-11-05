@@ -56,8 +56,14 @@ pub fn capture_of(png: &[u8], output: &OutputInfo, outputs: &[OutputInfo]) -> Re
         .to_rgba8();
     let crop = crop_for(output, outputs, decoded.dimensions())?;
     let region = image::imageops::crop_imm(&decoded, crop.x, crop.y, crop.width, crop.height).to_image();
-    let (width, height) = fit_long_edge(crop.width, crop.height, MAX_LONG_EDGE);
-    let scaled = if (width, height) == (crop.width, crop.height) {
+    capture_of_region(region, output)
+}
+
+/// The JPEG capture of `output` out of an image of exactly that output.
+pub fn capture_of_region(region: image::RgbaImage, output: &OutputInfo) -> Result<Capture, String> {
+    let (crop_w, crop_h) = region.dimensions();
+    let (width, height) = fit_long_edge(crop_w, crop_h, MAX_LONG_EDGE);
+    let scaled = if (width, height) == (crop_w, crop_h) {
         region
     } else {
         image::imageops::resize(&region, width, height, image::imageops::FilterType::Lanczos3)

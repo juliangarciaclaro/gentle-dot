@@ -83,7 +83,7 @@ risky actions ask the user to confirm, and some apps (Settings, Windows Security
 const SCREENSHOTS_UNSUPPORTED: &str = "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.";
 #[cfg(target_os = "linux")]
 const SCREENSHOTS_UNSUPPORTED: &str =
-    "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer.";
+    "Screenshots need an X11 session, or a Wayland session with the screenshot portal, so computer control is unavailable on this computer.";
 #[cfg(windows)]
 const SCREENSHOTS_UNSUPPORTED: &str =
     "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC.";
@@ -1407,7 +1407,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(
             first_text(&result),
-            "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
+            "Screenshots need an X11 session, or a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
         );
         #[cfg(windows)]
         assert_eq!(
@@ -1431,7 +1431,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(
             first_text(&result),
-            "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
+            "Screenshots need an X11 session, or a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
         );
         #[cfg(windows)]
         assert_eq!(
@@ -1456,7 +1456,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(
             first_text(&result),
-            "Screenshots need a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
+            "Screenshots need an X11 session, or a Wayland session with the screenshot portal, so computer control is unavailable on this computer."
         );
         #[cfg(windows)]
         assert_eq!(

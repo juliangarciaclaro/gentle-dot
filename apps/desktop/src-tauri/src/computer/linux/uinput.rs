@@ -73,7 +73,7 @@ const CLICK_GAP: Duration = Duration::from_millis(30);
 /// Wait between the motion events of a drag, which apps need to see the item move.
 const DRAG_GAP: Duration = Duration::from_millis(20);
 /// A double or triple click is the most an app understands.
-const MAX_CLICKS: u8 = 3;
+pub(super) const MAX_CLICKS: u8 = 3;
 /// One wheel notch is this many pixels of scroll; the wheel is capped so one call cannot spin.
 const PIXELS_PER_NOTCH: u32 = 40;
 const MAX_NOTCHES: i32 = 50;
@@ -120,7 +120,7 @@ fn button_frame(button: MouseButton, down: bool) -> Action {
 }
 
 /// Wheel notches for a pixel distance: at least one for any scroll, at most `MAX_NOTCHES`.
-fn notches(pixels: i32) -> i32 {
+pub(super) fn notches(pixels: i32) -> i32 {
     if pixels == 0 {
         return 0;
     }

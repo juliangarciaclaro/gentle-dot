@@ -1,14 +1,16 @@
 //! `LinuxDesktop`: the `Desktop` for a Linux session (S2). On Wayland (COSMIC) the windows,
 //! activation, and keyboard come from our own Wayland client, screenshots from the portal; the
-//! pointer is a seam (`Pointer`) the opt-in uinput device fills in. Every answer about which app
-//! is in front or under a point fails closed when the compositor does not say.
+//! pointer is a seam (`Pointer`) the opt-in uinput device fills in. On X11 everything comes from
+//! the X server (EWMH, XTest, `GetImage`) and the pointer needs no opt-in. Every answer about
+//! which app is in front or under a point fails closed when the session does not say.
 
 use super::apps::Catalog;
 use super::atspi::Atspi;
 use super::portal::Portal;
 use super::session::{self, Session};
 use super::wayland::Client;
-use super::{atspi, desktop_entry, shot, toplevels, typing};
+use super::x11_client::X11;
+use super::{atspi, desktop_entry, shot, toplevels, typing, x11};
 use crate::computer::blocklist::AppIdentity;
 use crate::computer::coords::Point;
 use crate::computer::glow::Frame;
@@ -20,9 +22,10 @@ use std::time::{Duration, Instant};
 /// Pointer actions need the opt-in uinput device (full desktop control).
 pub const POINTER_OFF: &str = "Moving and clicking the pointer needs full desktop control. Ask the user to turn it on in \
 Connectors → Computer; keyboard input and screenshots work without it.";
-const NO_SESSION: &str = "Computer control needs a Wayland session; no other session is supported yet.";
+const NO_SESSION: &str = "Computer control needs a Wayland or X11 session.";
 const NO_WINDOWS: &str = "This desktop does not tell Gentle Dot which window is in front, so it cannot list apps. \
-Computer control supports COSMIC.";
+Computer control supports COSMIC and X11 window managers that follow EWMH.";
+const NO_XTEST: &str = "The X server has no XTest extension, so Gentle Dot cannot send input.";
 /// How long the catalog of `.desktop` entries is reused.
 const CATALOG_REUSE: Duration = Duration::from_secs(60);
 /// The compositor needs a frame or two to take the glow overlay off the screen.
@@ -52,9 +55,52 @@ pub trait CaptureGuard: Send + Sync {
     fn restore(&self);
 }
 
+/// What the session is reached through.
+enum Backend {
+    Wayland(Client),
+    X11(Box<X11>),
+}
+
+impl Backend {
+    /// Outputs and windows now; the X11 windows are ordered bottom to top.
+    fn snapshot(&self) -> Result<(Vec<toplevels::OutputInfo>, Vec<toplevels::WindowInfo>), String> {
+        match self {
+            Backend::Wayland(client) => client.snapshot(),
+            Backend::X11(x11) => x11.snapshot(),
+        }
+    }
+
+    fn can_list_windows(&self) -> bool {
+        match self {
+            Backend::Wayland(client) => client.can_list_windows(),
+            Backend::X11(x11) => x11.can_list_windows(),
+        }
+    }
+
+    fn activate(&self, window: u32) -> Result<(), String> {
+        match self {
+            Backend::Wayland(client) => client.activate(window),
+            Backend::X11(x11) => x11.activate(window),
+        }
+    }
+}
+
+/// The backend for a session: only the one the session names is started.
+fn select<T>(
+    session: Session,
+    wayland: impl FnOnce() -> Result<T, String>,
+    x11: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match session {
+        Session::Wayland => wayland(),
+        Session::X11 => x11(),
+        Session::None => Err(NO_SESSION.to_string()),
+    }
+}
+
 pub struct LinuxDesktop {
-    /// `Err` is why there is no backend (not Wayland, or the compositor refused us).
-    client: Result<Client, String>,
+    /// `Err` is why there is no backend (no session, or the compositor or server refused us).
+    backend: Result<Backend, String>,
     portal: Portal,
     catalog: Mutex<(Instant, Arc<Catalog>)>,
     /// Present only while full desktop control is on; nothing moves the pointer without it.
@@ -76,19 +122,20 @@ impl LinuxDesktop {
     /// Connects for the current session. Never fails: a session that is not supported yields a
     /// desktop that reports itself unavailable.
     pub fn start(pointer: Option<Arc<dyn Pointer>>) -> Self {
-        let client = match session::detect(|key| std::env::var(key).ok()) {
-            Session::Wayland => Client::connect(),
-            Session::X11 | Session::None => Err(NO_SESSION.to_string()),
-        };
-        if let Err(error) = &client {
+        let backend = select(
+            session::detect(|key| std::env::var(key).ok()),
+            || Client::connect().map(Backend::Wayland),
+            || X11::connect().map(|x11| Backend::X11(Box::new(x11))),
+        );
+        if let Err(error) = &backend {
             eprintln!("gentle-dot: computer control is limited: {error}");
         }
-        Self::with_client(client, pointer)
+        Self::with_backend(backend, pointer)
     }
 
-    fn with_client(client: Result<Client, String>, pointer: Option<Arc<dyn Pointer>>) -> Self {
+    fn with_backend(backend: Result<Backend, String>, pointer: Option<Arc<dyn Pointer>>) -> Self {
         LinuxDesktop {
-            client,
+            backend,
             portal: Portal::default(),
             catalog: Mutex::new((Instant::now(), Arc::new(load_catalog()))),
             pointer: Mutex::new(pointer),
@@ -134,8 +181,31 @@ impl LinuxDesktop {
         *self.last_pointer.lock().unwrap_or_else(|p| p.into_inner()) = Some(at);
     }
 
-    fn client(&self) -> Result<&Client, String> {
-        self.client.as_ref().map_err(Clone::clone)
+    fn backend(&self) -> Result<&Backend, String> {
+        self.backend.as_ref().map_err(Clone::clone)
+    }
+
+    /// The X server, when the session is X11.
+    fn x11(&self) -> Option<&X11> {
+        match &self.backend {
+            Ok(Backend::X11(x11)) => Some(x11),
+            _ => None,
+        }
+    }
+
+    /// The window owning `at`: on X11 the topmost one (the window manager stacks them), else the
+    /// only or the activated one.
+    fn owner_at<'a>(
+        &self,
+        windows: &'a [toplevels::WindowInfo],
+        outputs: &[toplevels::OutputInfo],
+        at: Point,
+    ) -> Option<&'a toplevels::WindowInfo> {
+        if self.x11().is_some() {
+            x11::topmost_at(windows, outputs, at)
+        } else {
+            toplevels::owner_at(windows, outputs, at)
+        }
     }
 
     fn catalog(&self, refresh: bool) -> Arc<Catalog> {
@@ -148,11 +218,15 @@ impl LinuxDesktop {
 
     /// Outputs and the windows that can be a target, as the compositor has them now.
     fn snapshot(&self) -> Result<(Vec<toplevels::OutputInfo>, Vec<toplevels::WindowInfo>), String> {
-        let (outputs, windows) = self.client()?.snapshot()?;
+        let (outputs, windows) = self.backend()?.snapshot()?;
         Ok((outputs, toplevels::without_overlay(windows)))
     }
 
     fn pointer_position(&self) -> Option<Point> {
+        // The server knows where the pointer is, whoever moved it.
+        if let Some(at) = self.x11().and_then(X11::pointer) {
+            return Some(at);
+        }
         self.pointer()
             .and_then(|pointer| pointer.position())
             .or(*self.last_pointer.lock().unwrap_or_else(|p| p.into_inner()))
@@ -183,11 +257,38 @@ impl LinuxDesktop {
     }
 
     fn send(&self, batches: Vec<typing::Batch>) -> Result<(), String> {
-        let client = self.client()?;
+        let Backend::Wayland(client) = self.backend()? else { return Err("this session types through X11".into()) };
         for batch in batches {
             client.keys(Some(batch.keymap), batch.steps)?;
         }
         Ok(())
+    }
+
+    /// Plays key steps planned from the server's current keyboard map.
+    fn send_x11(&self, x11: &X11, plan: impl FnOnce(&x11::Mapping) -> Result<Vec<x11::KeyAction>, String>) -> Result<(), String> {
+        x11.keys(&plan(&x11.mapping()?)?)
+    }
+
+    /// X11: XTest keys and pointer, no opt-in.
+    fn post_x11(&self, x11: &X11, event: &InputEvent) -> Result<(), String> {
+        if !x11.has_input() {
+            return Err(NO_XTEST.into());
+        }
+        match event {
+            InputEvent::Key(combo) => self.send_x11(x11, |map| x11::combo_actions(combo, map)),
+            InputEvent::Text(text) => self.send_x11(x11, |map| x11::text_actions(text, map)),
+            InputEvent::Move(_) | InputEvent::Click { .. } | InputEvent::Drag { .. } | InputEvent::Scroll { .. } => {
+                let (outputs, _) = self.snapshot()?;
+                let layout: Vec<_> = outputs.iter().map(|output| output.rect).collect();
+                x11.play_pointer(&x11::pointer_actions(event, &layout)?)?;
+                match event {
+                    InputEvent::Move(at) | InputEvent::Click { at, .. } | InputEvent::Scroll { at, .. } => self.note_pointer(*at),
+                    InputEvent::Drag { to, .. } => self.note_pointer(*to),
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
     }
 
     fn launch(&self, id: &str, entry: &desktop_entry::DesktopEntry) -> Result<(), String> {
@@ -232,8 +333,17 @@ fn frame_of(rect: &super::pointer::Rect) -> Frame {
 
 impl Desktop for LinuxDesktop {
     fn permissions(&self) -> Permissions {
-        let screenshots = self.client.is_ok() && self.portal.available();
-        let keyboard = self.client.as_ref().is_ok_and(Client::has_keyboard);
+        // X11: input and screenshots go through the server, with nothing to turn on.
+        if let Some(x11) = self.x11() {
+            return Permissions {
+                accessibility: x11.has_input(),
+                screen_recording: true,
+                screenshots_supported: true,
+                screenshots_unsupported: None,
+            };
+        }
+        let screenshots = self.backend.is_ok() && self.portal.available();
+        let keyboard = matches!(&self.backend, Ok(Backend::Wayland(client)) if client.has_keyboard());
         Permissions {
             accessibility: input_reachable(keyboard, self.pointer().is_some()),
             screen_recording: screenshots,
@@ -249,17 +359,27 @@ impl Desktop for LinuxDesktop {
         // A session starts with a look at the screen: the toolkits get time to expose themselves.
         self.atspi.enable();
         let guard = self.guard.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let png = super::super::capture_order::capture(
-            || guard.as_ref().map_or(Ok(()), |guard| guard.hide()),
-            || self.portal.screenshot(),
-        );
+        let hide = || guard.as_ref().map_or(Ok(()), |guard| guard.hide());
+        let captured = match self.x11() {
+            Some(x11) => {
+                let pixels = super::super::capture_order::capture(hide, || x11.grab(output.rect));
+                pixels.and_then(|(format, data)| x11::capture_of_pixels(&data, format, output))
+            }
+            None => {
+                let png = super::super::capture_order::capture(hide, || self.portal.screenshot());
+                png.and_then(|png| shot::capture_of(&png, output, &outputs))
+            }
+        };
         if let Some(guard) = &guard {
             guard.restore();
         }
-        shot::capture_of(&png?, output, &outputs)
+        captured
     }
 
     fn post(&self, event: &InputEvent) -> Result<(), String> {
+        if let Some(x11) = self.x11() {
+            return self.post_x11(x11, event);
+        }
         match event {
             InputEvent::Key(combo) => self.send(vec![typing::combo_batch(combo)?]),
             InputEvent::Text(text) => self.send(typing::text_batches(text)?),
@@ -279,8 +399,7 @@ impl Desktop for LinuxDesktop {
     }
 
     fn list_apps(&self) -> Result<Vec<AppInfo>, String> {
-        let client = self.client()?;
-        if !client.can_list_windows() {
+        if !self.backend()?.can_list_windows() {
             return Err(NO_WINDOWS.into());
         }
         let (_, windows) = self.snapshot()?;
@@ -298,7 +417,7 @@ impl Desktop for LinuxDesktop {
         if let Ok((_, windows)) = self.snapshot() {
             let running = windows.iter().find(|w| desktop_entry::matches_app_id(id, entry, &w.app_id));
             if let Some(window) = running.and_then(|w| toplevels::window_to_activate(&windows, &w.app_id)) {
-                return self.client()?.activate(window.id);
+                return self.backend()?.activate(window.id);
             }
         }
         self.launch(id, entry)
@@ -306,7 +425,7 @@ impl Desktop for LinuxDesktop {
 
     fn element_at(&self, at: Point) -> Vec<AxElement> {
         let Ok((outputs, windows)) = self.snapshot() else { return Vec::new() };
-        let Some(owner) = toplevels::owner_at(&windows, &outputs, at) else { return Vec::new() };
+        let Some(owner) = self.owner_at(&windows, &outputs, at) else { return Vec::new() };
         let Some(point) = atspi::window_point((at.x, at.y), &toplevels::global_rects(owner, &outputs)) else {
             return Vec::new();
         };
@@ -332,14 +451,14 @@ impl Desktop for LinuxDesktop {
 
     fn window_owner_at(&self, at: Point) -> Option<AppIdentity> {
         let (outputs, windows) = self.snapshot().ok()?;
-        toplevels::owner_at(&windows, &outputs, at).map(|window| self.identity(window))
+        self.owner_at(&windows, &outputs, at).map(|window| self.identity(window))
     }
 
     fn activate(&self, pid: i32) {
         let Ok((_, windows)) = self.snapshot() else { return };
         let target = toplevels::app_for_pid(&windows, pid).and_then(|app_id| toplevels::window_to_activate(&windows, app_id));
-        if let (Some(window), Ok(client)) = (target, self.client()) {
-            if let Err(error) = client.activate(window.id) {
+        if let (Some(window), Ok(backend)) = (target, self.backend()) {
+            if let Err(error) = backend.activate(window.id) {
                 eprintln!("gentle-dot: cannot bring the app forward: {error}");
             }
         }
@@ -386,7 +505,12 @@ pub fn request_permission(
 ) -> Result<(), String> {
     match kind {
         crate::computer::PermissionKind::ScreenRecording => Ok(()),
-        crate::computer::PermissionKind::Accessibility => desktop.enable_full_control(steps),
+        // X11 sends input through XTest: nothing to turn on, nothing to confirm.
+        crate::computer::PermissionKind::Accessibility => match desktop.x11() {
+            Some(x11) if x11.has_input() => Ok(()),
+            Some(_) => Err(NO_XTEST.into()),
+            None => desktop.enable_full_control(steps),
+        },
     }
 }
 
@@ -410,7 +534,7 @@ mod tests {
     }
 
     fn offline(pointer: Option<Arc<dyn Pointer>>) -> LinuxDesktop {
-        LinuxDesktop::with_client(Err("no compositor".into()), pointer)
+        LinuxDesktop::with_backend(Err("no compositor".into()), pointer)
     }
 
     /// Runs `enable_full_control` with the given answers and returns the result and the calls made.
@@ -435,6 +559,32 @@ mod tests {
             },
         });
         (result, calls.into_inner())
+    }
+
+    #[test]
+    fn the_session_picks_one_backend_and_wayland_still_wins() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
+        };
+        let started = |pairs| {
+            let calls = RefCell::new(Vec::new());
+            let result = select(
+                session::detect(env(pairs)),
+                || {
+                    calls.borrow_mut().push("wayland");
+                    Ok(1)
+                },
+                || {
+                    calls.borrow_mut().push("x11");
+                    Ok(2)
+                },
+            );
+            (result, calls.into_inner())
+        };
+        // XWayland sets DISPLAY inside a Wayland session: still the Wayland client, never X11.
+        assert_eq!(started(&[("WAYLAND_DISPLAY", "wayland-1"), ("DISPLAY", ":1")]), (Ok(1), vec!["wayland"]));
+        assert_eq!(started(&[("DISPLAY", ":0")]), (Ok(2), vec!["x11"]));
+        assert_eq!(started(&[]), (Err(NO_SESSION.to_string()), vec![]));
     }
 
     #[test]

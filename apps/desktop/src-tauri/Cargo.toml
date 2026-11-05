@@ -75,6 +75,8 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 cosmic-protocols = { version = "0.2", default-features = false, features = ["client"] }
 zbus = "5"
+# Computer control on an X11 session (S2): XTest input, RandR outputs, EWMH windows, `GetImage`.
+x11rb = { version = "0.13", features = ["xtest", "randr"] }
 
 # The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
 [target.'cfg(target_os = "linux")'.dev-dependencies]

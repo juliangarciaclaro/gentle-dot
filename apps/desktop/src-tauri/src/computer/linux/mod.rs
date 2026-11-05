@@ -16,6 +16,7 @@ pub mod shot;
 pub mod toplevels;
 pub mod typing;
 pub mod uinput;
+pub mod x11;
 
 #[cfg(target_os = "linux")]
 mod desktop;
@@ -23,6 +24,8 @@ mod desktop;
 mod portal;
 #[cfg(target_os = "linux")]
 mod wayland;
+#[cfg(target_os = "linux")]
+mod x11_client;
 
 #[cfg(target_os = "linux")]
 pub use desktop::{request_permission, startup_pointer, CaptureGuard, FullControl, LinuxDesktop, Pointer, OVERLAY_GONE};

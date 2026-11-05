@@ -40,7 +40,7 @@ pub struct WindowInfo {
     pub frames: Vec<(u32, Rect)>,
 }
 
-fn contains(rect: &Rect, at: Point) -> bool {
+pub(super) fn contains(rect: &Rect, at: Point) -> bool {
     at.x >= f64::from(rect.x)
         && at.y >= f64::from(rect.y)
         && at.x < f64::from(rect.x) + f64::from(rect.width)
