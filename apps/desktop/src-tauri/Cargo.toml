@@ -66,6 +66,8 @@ core-foundation = "0.10"
 # dependency is already linked by tao on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+# The approval dialog (S5): a GTK dialog on the main thread, the `gtk` that tauri and tao already link.
+gtk = "0.18"
 
 # The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
 [target.'cfg(target_os = "linux")'.dev-dependencies]

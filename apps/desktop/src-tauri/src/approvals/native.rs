@@ -7,7 +7,7 @@ use tauri::AppHandle;
 
 pub struct NativePrompt {
     app: AppHandle,
-    /// The approval dialog on screen (Windows), so a timed-out one can be refused.
+    /// The approval dialog on screen (Windows, Linux), so a timed-out one can be refused.
     open: OpenDialog,
 }
 
@@ -27,9 +27,9 @@ impl Prompt for NativePrompt {
     /// `alert` reads as Decline. The approvals gate
     /// guarantees no other approval dialog is up, but a computer-control dialog stacked on top
     /// would be aborted instead, which also refuses (fail closed). Windows: presses the approval
-    /// dialog's own refusing button; a dialog not yet up then refuses itself at its deadline
-    /// (`ApprovalDialog::deadline`). Elsewhere the stale dialog stays until the user answers, and
-    /// that answer is ignored.
+    /// dialog's own refusing button, and so does Linux, from the GTK dialog's own timer; a dialog
+    /// not yet up then refuses itself at its deadline (`ApprovalDialog::deadline`). Elsewhere the
+    /// stale dialog stays until the user answers, and that answer is ignored.
     fn dismiss(&self) {
         self.open.refuse();
         #[cfg(target_os = "macos")]

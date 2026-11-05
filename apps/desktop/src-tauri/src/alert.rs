@@ -24,10 +24,20 @@
 //! thread, so no other thread ever touches its window. A dialog given a deadline refuses itself
 //! the same way once it passes, even when it opened after the timeout.
 //!
-//! Elsewhere (Linux): the dialog plugin with the allowing label in the OK slot and the refusing one
-//! in the cancel slot, so every outcome rfd reports as `Cancel` (the refusing button, Escape,
-//! closing, a dialog that failed) arrives as the refusing label. rfd's GTK dialog sets no default
-//! response, so Return does not pick the allowing button either (not verified on a Linux desktop).
+//! Linux: a `gtk::MessageDialog` shown on the GTK main thread (S5), asked from a worker thread that
+//! waits for the answer. The refusing button is the default response, so Return refuses; Escape and
+//! closing the window answer `DeleteEvent`, and only the allowing button's own response id allows.
+//! Moving the focus to the allowing button (Tab) and pressing Return or Space allows, as a click
+//! does. The dialog plugin is not used there: rfd's GTK dialog sets no default response and cannot
+//! be closed from another thread. Like Windows, an `OpenDialog` asks the dialog to refuse (an
+//! approval that timed out): the dialog's own GLib timer sees the request, on the main thread, and
+//! a dialog given a deadline refuses itself once it passes, even when it opened after it. Showing,
+//! the default and the dismissal need a Linux desktop, so `docs/linux-testing.md` checks them by hand;
+//! the response mapping is unit tested on every OS.
+//!
+//! Elsewhere: the dialog plugin with the allowing label in the OK slot and the refusing one in the
+//! cancel slot, so every outcome rfd reports as `Cancel` (the refusing button, Escape, closing, a
+//! dialog that failed) arrives as the refusing label.
 
 use tauri::AppHandle;
 use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult};
@@ -41,17 +51,21 @@ pub const ALLOW_RESPONSE: isize = 1001;
 pub const TASK_REFUSE_ID: i32 = 2000;
 pub const TASK_ALLOW_ID: i32 = 2001;
 
-/// A request to refuse the dialog on screen (Windows), set from another thread and acted on by
-/// the dialog's own timer. Elsewhere it holds nothing: no other platform refuses a dialog this way.
+/// The GTK dialog's response ids (Linux): the refusing one is the default.
+pub const GTK_REFUSE_ID: u16 = 2000;
+pub const GTK_ALLOW_ID: u16 = 2001;
+
+/// A request to refuse the dialog on screen (Windows, Linux), set from another thread and acted on
+/// by the dialog's own timer. Elsewhere it holds nothing: no other platform refuses a dialog this way.
 #[derive(Default)]
-pub struct OpenDialog(#[cfg(windows)] std::sync::atomic::AtomicBool);
+pub struct OpenDialog(#[cfg(any(windows, target_os = "linux"))] std::sync::atomic::AtomicBool);
 
 impl OpenDialog {
-    /// Asks the dialog on screen, if one is, to refuse (Windows; elsewhere nothing). Its next
-    /// timer tick, within about 200 ms, presses its refusing button, and the dialog answers as
-    /// refused.
+    /// Asks the dialog on screen, if one is, to refuse (Windows, Linux; elsewhere nothing). Its
+    /// next timer tick, within about 200 ms, presses its refusing button, and the dialog answers
+    /// as refused.
     pub fn refuse(&self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         self.0.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -85,7 +99,13 @@ impl Choice {
         self.allow != self.refuse && button == Some(TASK_ALLOW_ID)
     }
 
-    /// The plugin's buttons (Linux): the refusing label takes the cancel slot, where rfd puts
+    /// True only for the allowing button's response id (Linux); `None` is a dialog that never ran.
+    /// Escape and closing answer GTK's `DeleteEvent` (-4), which refuses.
+    pub fn allows_gtk_response(&self, response: Option<i32>) -> bool {
+        self.allow != self.refuse && response == Some(i32::from(GTK_ALLOW_ID))
+    }
+
+    /// The plugin's buttons (platforms without a dialog of their own): the refusing label takes the cancel slot, where rfd puts
     /// Escape, closing, and failures.
     pub fn buttons(&self) -> MessageDialogButtons {
         MessageDialogButtons::OkCancelCustom(self.allow.into(), self.refuse.into())
@@ -137,7 +157,11 @@ pub fn ask_tracked(
         let _ = app;
         windows::ask(title, message, choice, open, deadline)
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::ask(app, title, message, choice, open, deadline)
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         let _ = (open, deadline);
         use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -189,6 +213,111 @@ mod macos {
         #[allow(deprecated)]
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
         alert.runModal()
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{refuse_due, Choice, OpenDialog, GTK_ALLOW_ID, GTK_REFUSE_ID};
+    use gtk::prelude::*;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    use tauri::AppHandle;
+
+    pub fn ask(
+        app: &AppHandle,
+        title: &str,
+        message: &str,
+        choice: Choice,
+        open: Option<&OpenDialog>,
+        deadline: Option<Instant>,
+    ) -> bool {
+        if gtk::is_initialized_main_thread() {
+            eprintln!("gentle-dot: a confirmation was asked on the main thread, so it was refused");
+            return false;
+        }
+        // A refusal asked for an earlier dialog is not this one's. One asked for while this dialog
+        // was still opening is only lost when the approval already timed out, and then its
+        // deadline has passed, so the first tick refuses.
+        if let Some(open) = open {
+            open.0.store(false, Ordering::SeqCst);
+        }
+        // The timer reads the request from the main thread; `open` is borrowed, so it is shared
+        // as a plain flag the caller keeps alive until the answer arrives.
+        let requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watch = requested.clone();
+        let (answer, answered) = std::sync::mpsc::channel();
+        let (title, message) = (title.to_owned(), message.to_owned());
+        let scheduled = app.run_on_main_thread(move || show(&title, &message, choice, watch, deadline, answer));
+        if scheduled.is_err() {
+            return false;
+        }
+        // Forward the request to the dialog's flag until the answer arrives (a task dropped
+        // without running, the app quitting, reads as no answer and refuses).
+        loop {
+            if open.is_some_and(|open| open.0.load(Ordering::SeqCst)) {
+                requested.store(true, Ordering::SeqCst);
+            }
+            match answered.recv_timeout(Duration::from_millis(100)) {
+                Ok(response) => return choice.allows_gtk_response(response),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+    }
+
+    /// Builds and shows the dialog on the GTK main thread and returns at once; the answer, once
+    /// given, goes through `answer`. Refusing is the default response.
+    fn show(
+        title: &str,
+        message: &str,
+        choice: Choice,
+        requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        deadline: Option<Instant>,
+        answer: std::sync::mpsc::Sender<Option<i32>>,
+    ) {
+        if refuse_due(false, deadline, Instant::now()) {
+            let _ = answer.send(Some(i32::from(GTK_REFUSE_ID)));
+            return;
+        }
+        let dialog = gtk::MessageDialog::new(
+            None::<&gtk::Window>,
+            gtk::DialogFlags::empty(),
+            gtk::MessageType::Warning,
+            gtk::ButtonsType::None,
+            title,
+        );
+        dialog.set_title(title);
+        dialog.set_secondary_text(Some(message));
+        // The refusing button is added first and is the default: Return refuses; Escape and
+        // closing answer `DeleteEvent`, which refuses too.
+        let [refuse, allow] = choice.alert_buttons();
+        let refuse_button = dialog.add_button(refuse, gtk::ResponseType::Other(GTK_REFUSE_ID));
+        dialog.add_button(allow, gtk::ResponseType::Other(GTK_ALLOW_ID));
+        dialog.set_default_response(gtk::ResponseType::Other(GTK_REFUSE_ID));
+        refuse_button.grab_focus();
+        // Gentle Dot's windows sit under the app being controlled; this one has to be seen.
+        dialog.set_keep_above(true);
+        let answer = std::cell::RefCell::new(Some(answer));
+        dialog.connect_response(move |dialog, response| {
+            if let Some(answer) = answer.borrow_mut().take() {
+                let _ = answer.send(Some(gtk::glib::translate::IntoGlib::into_glib(response)));
+            }
+            dialog.close();
+        });
+        // The dialog's own timer refuses it when asked for or once its deadline passes.
+        gtk::glib::timeout_add_local(Duration::from_millis(200), {
+            let dialog = dialog.clone();
+            move || {
+                if refuse_due(requested.load(Ordering::SeqCst), deadline, Instant::now()) {
+                    dialog.response(gtk::ResponseType::Other(GTK_REFUSE_ID));
+                    return gtk::glib::ControlFlow::Break;
+                }
+                // Stops once the dialog is gone.
+                if dialog.is_visible() { gtk::glib::ControlFlow::Continue } else { gtk::glib::ControlFlow::Break }
+            }
+        });
+        dialog.present();
     }
 }
 
@@ -365,6 +494,19 @@ mod tests {
         }
         let same = Choice { allow: "OK", refuse: "OK" };
         assert!(!same.allows_response(Some(ALLOW_RESPONSE)));
+    }
+
+    #[test]
+    fn on_linux_only_the_allowing_gtk_response_allows() {
+        assert!(CHOICE.allows_gtk_response(Some(i32::from(GTK_ALLOW_ID))));
+        // The refusing (default) button, Escape or closing (DeleteEvent -4), GTK's own OK, Accept,
+        // Cancel and Yes, an unknown id, and a dialog that never ran all refuse.
+        for response in [Some(i32::from(GTK_REFUSE_ID)), Some(-4), Some(-5), Some(-3), Some(-6), Some(-8), Some(0), Some(2002), None] {
+            assert!(!CHOICE.allows_gtk_response(response), "{response:?}");
+        }
+        let same = Choice { allow: "OK", refuse: "OK" };
+        assert!(!same.allows_gtk_response(Some(i32::from(GTK_ALLOW_ID))));
+        assert_ne!(GTK_ALLOW_ID, GTK_REFUSE_ID);
     }
 
     #[test]
