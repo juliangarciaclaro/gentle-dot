@@ -118,10 +118,15 @@ describe("DotSurface", () => {
 		if (state !== "needs_you") expect(screen.queryByText("!")).toBeNull();
 	});
 
-	it("names the PC while controlling Windows", () => {
-		const agent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows NT 10.0");
+	it.each([
+		["Windows NT 10.0", "PC"],
+		["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15", "computer"],
+	])("names the machine of %s while controlling it", (userAgent, name) => {
+		const agent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue(userAgent);
 		render(<DotSurface agentState="working" connected toggle={vi.fn()} startDrag={vi.fn()} inControl yolo />);
-		expect(screen.getByRole("button")).toHaveAccessibleName("Gentle Dot: controlling your PC, yolo mode on");
+		expect(screen.getByRole("button")).toHaveAccessibleName(
+			`Gentle Dot: controlling your ${name}, yolo mode on`,
+		);
 		agent.mockRestore();
 	});
 

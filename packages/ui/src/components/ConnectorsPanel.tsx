@@ -22,7 +22,7 @@ interface ConnectorsPanelProps {
 	appSend?: Send;
 	dispatch: (action: DotAction) => void;
 	openUrl: (url: string) => void;
-	/** Computer control, in the desktop app on macOS only. */
+	/** Computer control, in the desktop app (macOS, Windows, Linux). */
 	computer?: ComputerControls;
 	/** The desktop app's voice engine and optional local model (S30.5). */
 	voiceModel?: boolean;

@@ -189,8 +189,8 @@ describe("the Settings screen (S33.1)", () => {
 });
 
 describe("voice language (S30.6)", () => {
-	it("does not offer macOS voice language on Windows", async () => {
-		vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows NT 10.0");
+	it.each(["Windows NT 10.0", LINUX_AGENT])("does not offer macOS voice language on %s", async (agent) => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent);
 		await openSettings();
 		expect(screen.queryByRole("combobox", { name: "Voice language" })).toBeNull();
 	});

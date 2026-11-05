@@ -25,6 +25,17 @@ export function isWindows(userAgent: string = navigator.userAgent): boolean {
 	return /Windows/.test(userAgent);
 }
 
+/** WebKitGTK says Linux (and X11 or Wayland sessions say X11) in its user agent. */
+export function isLinux(userAgent: string = navigator.userAgent): boolean {
+	return /Linux|X11/.test(userAgent) && !isMac(userAgent) && !isWindows(userAgent);
+}
+
+/** What the user's machine is called in the panel (S6): a Mac, a PC, or simply the computer. */
+export function computerName(userAgent: string = navigator.userAgent): string {
+	if (isWindows(userAgent)) return "PC";
+	return isLinux(userAgent) ? "computer" : "Mac";
+}
+
 type Modifier = "Ctrl" | "Alt" | "Shift" | "Super";
 
 /** The macOS order of modifiers (⌃⌥⇧⌘), also used for the accelerator the app saves. */

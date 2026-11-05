@@ -7,7 +7,7 @@ import {
 	type ComputerYolo,
 	timeLeft,
 } from "../computer.ts";
-import { isWindows } from "../shortcut.ts";
+import { computerName, isLinux, isWindows } from "../shortcut.ts";
 
 /** Computer control in the desktop panel (S24.5, S24.6); the web page never gets it. */
 export interface ComputerControls {
@@ -28,12 +28,19 @@ const PERMISSIONS: [ComputerPermission, string][] = [
 	["accessibility", "Accessibility"],
 	["screenRecording", "Screen Recording"],
 ];
+/** On Linux the same two permissions are input and screenshots (S6). */
+const LINUX_PERMISSIONS: [ComputerPermission, string][] = [
+	["accessibility", "Keyboard and pointer"],
+	["screenRecording", "Screenshots"],
+];
+const LINUX_WAYLAND_NOTE =
+	"On Wayland, Gentle Dot needs full desktop control to use the pointer; it uses a virtual input device (uinput).";
 
 export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
 /** Names the panic shortcut only when the app registered it; until it says so, only Stop is promised. */
-const yoloNote = (windows: boolean, panicShortcut: boolean) =>
-	`Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; ${panicShortcut ? `Stop and ${windows ? "Alt+Shift+Esc" : "⌥⇧Esc"} still work` : "Stop still works"}.`;
+const yoloNote = (altShiftEsc: boolean, panicShortcut: boolean) =>
+	`Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; ${panicShortcut ? `Stop and ${altShiftEsc ? "Alt+Shift+Esc" : "⌥⇧Esc"} still work` : "Stop still works"}.`;
 const WINDOWS_TOO_OLD_NOTE =
 	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
 const WINDOWS_UNKNOWN_VERSION_NOTE =
@@ -47,7 +54,7 @@ interface ComputerBannerProps {
 	stop: () => void;
 }
 
-/** "Controlling your Mac · mm:ss left" with a Stop button, while a session is active. */
+/** "Controlling your Mac (PC, computer) · mm:ss left" with a Stop button, while a session is active. */
 export function ComputerBanner({ session, yolo, stop }: ComputerBannerProps) {
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
@@ -59,7 +66,7 @@ export function ComputerBanner({ session, yolo, stop }: ComputerBannerProps) {
 		<section className="computer-banner" aria-label="Computer control">
 			<span className="computer-banner-light" aria-hidden="true" />
 			<span>
-				Controlling your {isWindows() ? "PC" : "Mac"}
+				Controlling your {computerName()}
 				{left}
 			</span>
 			{yolo ? (
@@ -84,6 +91,7 @@ interface ComputerEntryProps {
 export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 	const { permissions, requestPermission, yolo, setYolo } = controls;
 	const windows = isWindows();
+	const linux = isLinux();
 	const [granted, setGranted] = useState<ComputerPermissions>();
 	const check = useCallback(() => {
 		permissions().then(setGranted, () => setGranted(undefined));
@@ -107,7 +115,7 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 			) : null}
 			{windows ? null : (
 				<ul className="computer-permissions">
-					{PERMISSIONS.map(([kind, label]) => {
+					{(linux ? LINUX_PERMISSIONS : PERMISSIONS).map(([kind, label]) => {
 						const allowed = granted?.[kind] === true;
 						const id = `computer-permission-${kind}`;
 						return (
@@ -133,6 +141,7 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					})}
 				</ul>
 			)}
+			{linux ? <p className="connector-note">{LINUX_WAYLAND_NOTE}</p> : null}
 			{windows ? null : (
 				<div className="provider-actions">
 					<button type="button" onClick={check}>
@@ -162,8 +171,8 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					<span className="switch-knob" aria-hidden="true" />
 				</button>
 			</div>
-			<p className="connector-note">{yoloNote(windows, granted?.panicShortcut === true)}</p>
-			{windows ? null : <p className="connector-note">{DEBUG_BUILD_NOTE}</p>}
+			<p className="connector-note">{yoloNote(windows || linux, granted?.panicShortcut === true)}</p>
+			{windows || linux ? null : <p className="connector-note">{DEBUG_BUILD_NOTE}</p>}
 			{info?.noImages ? <p className="connector-note computer-warning">{NO_IMAGES_NOTE}</p> : null}
 		</li>
 	);

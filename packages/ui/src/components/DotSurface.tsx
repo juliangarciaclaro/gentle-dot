@@ -1,7 +1,7 @@
 import type { AgentState } from "@gentle-dot/protocol";
 import { useRef } from "react";
 import { Rose, type RoseMood } from "../rose/Rose.tsx";
-import { isWindows } from "../shortcut.ts";
+import { computerName } from "../shortcut.ts";
 
 const LABELS: Record<AgentState, string> = {
 	starting: "starting",
@@ -28,7 +28,7 @@ const DRAG_THRESHOLD_PX = 3;
 interface DotSurfaceProps {
 	agentState: AgentState;
 	connected: boolean;
-	/** The assistant controls the Mac (S24.6); it shows over every other state. */
+	/** The assistant controls the computer (S24.6); it shows over every other state. */
 	inControl?: boolean;
 	/** Yolo mode is on (S24.9): risky actions run without asking, so the rose says so. */
 	yolo?: boolean;
@@ -47,7 +47,7 @@ export function DotSurface({
 }: DotSurfaceProps) {
 	const press = useRef<{ x: number; y: number; dragging: boolean } | undefined>(undefined);
 	const state = connected ? agentState : "restarting";
-	const label = inControl ? `controlling your ${isWindows() ? "PC" : "Mac"}` : LABELS[state];
+	const label = inControl ? `controlling your ${computerName()}` : LABELS[state];
 
 	return (
 		<button

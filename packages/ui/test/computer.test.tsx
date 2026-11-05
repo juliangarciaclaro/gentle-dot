@@ -13,6 +13,8 @@ const WINDOWS_2004_NOTE =
 	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
 const YOLO_NOTE_WITHOUT_PANIC =
 	"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop still works.";
+const LINUX_WAYLAND_NOTE =
+	"On Wayland, Gentle Dot needs full desktop control to use the pointer; it uses a virtual input device (uinput).";
 const UNKNOWN_WINDOWS_NOTE =
 	"Gentle Dot cannot tell which Windows version this is, so computer control is unavailable: screenshots need Windows 10 version 2004 (build 19041) or newer.";
 
@@ -429,6 +431,40 @@ describe("on macOS", () => {
 		await renderApp("?surface=panel");
 		expect(await screen.findByText("Controlling your Mac")).toBeInTheDocument();
 		expect(screen.queryByText("Controlling your PC")).toBeNull();
+	});
+});
+
+describe("on Linux (S6)", () => {
+	beforeEach(() => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+		);
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it("names the Linux permissions, the Wayland note and Alt+Shift+Esc, and never says Mac", async () => {
+		// The daemon's own wording for the entry is not under test here.
+		h.state = connectorsOpen([computerEntry({ sends: "Click, type, and open apps on this computer." })]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		const input = await within(entry).findByRole("listitem", { name: "Keyboard and pointer" });
+		expect(within(entry).getByRole("listitem", { name: "Screenshots" })).toBeInTheDocument();
+		expect(within(entry).queryByText("Accessibility")).toBeNull();
+		expect(within(entry).queryByText("Screen Recording")).toBeNull();
+		expect(within(entry).getByText(LINUX_WAYLAND_NOTE)).toBeInTheDocument();
+		expect(within(entry).queryByText(DEBUG_NOTE)).toBeNull();
+		expect(within(entry).queryByText("Windows asks for no permission for computer control.")).toBeNull();
+		expect(await within(entry).findByText(/Stop and Alt\+Shift\+Esc still work/)).toBeInTheDocument();
+		expect(entry.textContent).not.toMatch(/Mac|⌥/);
+		await userEvent.click(within(input).getByRole("button", { name: "Grant Keyboard and pointer" }));
+		expect(h.invoke).toHaveBeenCalledWith("computer_request_permission", { kind: "accessibility" });
+	});
+
+	it("names the computer in the session banner", async () => {
+		h.status = { active: true };
+		await renderApp("?surface=panel");
+		expect(await screen.findByText("Controlling your computer")).toBeInTheDocument();
+		expect(screen.queryByText("Controlling your Mac")).toBeNull();
 	});
 });
 

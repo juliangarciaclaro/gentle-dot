@@ -31,17 +31,19 @@ pub const GLOW_WINDOW: &str = "glow";
 pub const GLOW_TITLE: &str = "Gentle Dot Glow";
 /// ⌥⇧Esc ends the session from anywhere (S24.3).
 pub const PANIC_SHORTCUT: &str = "Alt+Shift+Escape";
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Mac for 30 minutes?";
+#[cfg(target_os = "linux")]
+pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this computer for 30 minutes?";
 #[cfg(windows)]
 pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this PC for 30 minutes?";
 /// Every computer-control dialog defaults to its refusing button (L75 A2).
 pub const GRANT_CHOICE: Choice = Choice { allow: "Allow", refuse: "Deny" };
 pub const CONFIRM_CHOICE: Choice = Choice { allow: "Allow", refuse: "Cancel" };
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub const YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and ⌥⇧Esc still work.";
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub const YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and Alt+Shift+Esc still work.";
 pub const YOLO_CHOICE: Choice = Choice { allow: "Turn On", refuse: "Cancel" };
@@ -49,9 +51,12 @@ pub const YOLO_CHOICE: Choice = Choice { allow: "Turn On", refuse: "Cancel" };
 pub const YOLO_TEXT_WITHOUT_PANIC: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you \
 first, for up to 1 hour. Stop still works.";
 /// Told once at launch when the panic shortcut cannot be registered.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub const PANIC_UNAVAILABLE_TEXT: &str = "⌥⇧Esc cannot stop computer control: another app or macOS already uses it. \
 Use Stop in the panel or the menu bar instead.";
+#[cfg(target_os = "linux")]
+pub const PANIC_UNAVAILABLE_TEXT: &str = "Alt+Shift+Esc cannot stop computer control: another app or the desktop already uses it. \
+Use Stop in the panel or the tray menu instead.";
 #[cfg(windows)]
 pub const PANIC_UNAVAILABLE_TEXT: &str = "Alt+Shift+Esc cannot stop computer control: another app or Windows already uses \
 it. Use Stop in the panel or the tray menu instead.";
@@ -642,14 +647,34 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    fn linux_dialogs_name_the_computer_and_panic_shortcut() {
+        assert_eq!(GRANT_TEXT, "Allow Gentle Dot to see and control this computer for 30 minutes?");
+        assert_eq!(GRANT_CHOICE, Choice { allow: "Allow", refuse: "Deny" });
+        assert_eq!(YOLO_TEXT, "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop and Alt+Shift+Esc still work.");
+        assert_eq!(YOLO_CHOICE, Choice { allow: "Turn On", refuse: "Cancel" });
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_missing_panic_shortcut_is_explained_once_on_linux() {
+        assert_eq!(
+            PANIC_UNAVAILABLE_TEXT,
+            "Alt+Shift+Esc cannot stop computer control: another app or the desktop already uses it. \
+Use Stop in the panel or the tray menu instead."
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn the_grant_dialog_asks_exactly_what_the_spec_says() {
         assert_eq!(GRANT_TEXT, "Allow Gentle Dot to see and control this Mac for 30 minutes?");
         assert_eq!(GRANT_CHOICE, Choice { allow: "Allow", refuse: "Deny" });
     }
 
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     fn the_yolo_dialog_says_what_it_skips_and_for_how_long() {
         assert_eq!(
             YOLO_TEXT,
@@ -680,7 +705,7 @@ for up to 1 hour. Stop still works."
     }
 
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     fn a_missing_panic_shortcut_is_explained_once_on_the_mac() {
         assert_eq!(
             PANIC_UNAVAILABLE_TEXT,
