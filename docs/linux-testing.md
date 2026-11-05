@@ -219,6 +219,22 @@ Open **Connectors**, connect one that signs in with your account (for example No
 
 The keyring keeps these items encrypted on disk, but while it is unlocked any program running as you can read them (see docs/install.md, Linux). If your session has no keyring, the connector does not run and `~/.gentle-dot/daemon.log` says `no Secret Service in this desktop session`; note that in the report.
 
+### 18. Computer control (optional, COSMIC or an X11 session)
+
+In the chat, ask "Take a screenshot and tell me which app is in front".
+
+**Expected:** a Gentle Dot dialog asks to allow it to see and control this computer for 30 minutes, with Cancel as the default. Allow it. The top edge of the screen glows pink while the assistant works, the rose and the panel hide during the screenshot and are not in it, and the panel says "Controlling your computer" with Stop.
+
+Then check each of these and note any that fail:
+
+1. **Typing:** open a text editor and ask "type Hello, ñandú! in the editor and press Return". The text arrives exactly, accents included.
+2. **Full desktop control (Wayland only):** ask "click the editor's File menu". The assistant says pointer actions need full desktop control. Open **Connectors → Computer** and choose **Grant**. If Gentle Dot says it cannot write `/dev/uinput`, add the udev rule it names, run the two `udevadm` commands, and grant again. A dialog asks to turn it on, with Cancel as the default; choose to turn it on and ask again. The menu opens. On X11 the click works without this step.
+3. **Pointer:** ask it to drag a file on the desktop and to scroll a long web page, on each monitor if you have several. The pointer lands where it should, the drag ends where it should, and the page scrolls in the direction asked.
+4. **Risky actions:** in an email or chat app, write a message and ask the assistant to click Send. A Gentle Dot dialog asks before the click, with the refusing answer as the default. Choose to refuse: nothing is sent.
+5. **Stale approval (needs step 17's connector):** ask for a connector action that sends and leave its Gentle Dot dialog open for more than two minutes without answering. The dialog goes away by itself, and nothing is sent.
+6. **Panic shortcut:** start a task that takes a while and press Alt+Shift+Esc, once with a Gentle Dot window focused and once with another app focused. Note which ones end the session (on COSMIC it may only work while an X11 app is focused).
+7. **Turn it off:** quit Gentle Dot, set `"full_control": false` in `~/.gentle-dot/desktop.json`, open it again, and ask for a click: the assistant says full desktop control is off.
+
 ## Reporting Wayland limitations
 
 Some things Wayland does not allow at all, and we already work around them: apps cannot place their own windows, stay on top by themselves, or register global shortcuts. If you notice something else that does not work the same way as on other systems, write in the report:
@@ -275,6 +291,7 @@ Source version:               (from source: output of git rev-parse --short HEAD
 | 15| Quit and relaunch          |                                |       |
 | 16| Launch at login (optional) |                                |       |
 | 17| Connector secrets          |                                |       |
+| 18| Computer control           |                                |       |
 
 Wayland limitations noticed:
 
