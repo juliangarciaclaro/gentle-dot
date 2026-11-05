@@ -1,5 +1,6 @@
-//! Persistence of the Dot in `<data dir>/desktop.json`: its position and
-//! whether the user hid it (S26.1). Each write keeps the other field.
+//! Persistence of the Dot in `<data dir>/desktop.json`: its position, whether the user hid it
+//! (S26.1), and whether the user turned on full desktop control (Linux, S2). Each write keeps
+//! the other fields.
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -19,6 +20,9 @@ struct DesktopState {
     /// Missing in files written before the rose could be hidden.
     #[serde(default)]
     rose_hidden: bool,
+    /// The user turned on full desktop control (the uinput pointer). Off unless the file says so.
+    #[serde(default)]
+    full_control: bool,
 }
 
 fn read(path: &Path) -> Option<DesktopState> {
@@ -52,6 +56,17 @@ pub fn load_rose_hidden(path: &Path) -> bool {
 pub fn save_rose_hidden(path: &Path, hidden: bool) -> io::Result<()> {
     let state = read(path).unwrap_or_default();
     write(path, &DesktopState { rose_hidden: hidden, ..state })
+}
+
+/// Whether the user turned on full desktop control; false when the file is missing or
+/// unreadable (fail closed).
+pub fn load_full_control(path: &Path) -> bool {
+    read(path).is_some_and(|state| state.full_control)
+}
+
+pub fn save_full_control(path: &Path, enabled: bool) -> io::Result<()> {
+    let state = read(path).unwrap_or_default();
+    write(path, &DesktopState { full_control: enabled, ..state })
 }
 
 #[cfg(test)]
@@ -128,5 +143,27 @@ mod tests {
             fs::write(&file, body).unwrap();
             assert_eq!(load(&file), None, "{name}");
         }
+    }
+
+    #[test]
+    fn full_control_is_off_unless_the_file_says_on_and_keeps_the_other_fields() {
+        let dir = scratch("full-control");
+        assert!(!load_full_control(&dir.join("absent.json")));
+        let corrupt = dir.join("corrupt.json");
+        fs::write(&corrupt, "{ nope").unwrap();
+        assert!(!load_full_control(&corrupt));
+        let old = dir.join("old.json");
+        fs::write(&old, r#"{ "dot_points": { "x": 12, "y": 400 }, "rose_hidden": true }"#).unwrap();
+        assert!(!load_full_control(&old));
+        save_full_control(&old, true).unwrap();
+        assert!(load_full_control(&old));
+        assert!(load_rose_hidden(&old));
+        assert_eq!(load(&old), Some(DotPosition { x: 12, y: 400 }));
+        // The other writes keep the choice, and turning it off is remembered.
+        save(&old, DotPosition { x: 1, y: 2 }).unwrap();
+        save_rose_hidden(&old, false).unwrap();
+        assert!(load_full_control(&old));
+        save_full_control(&old, false).unwrap();
+        assert!(!load_full_control(&old));
     }
 }

@@ -93,6 +93,11 @@ pub struct Computer {
     desktop: Arc<dyn super::Desktop>,
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     working: Arc<Working>,
+    /// Full desktop control (the uinput pointer) is turned on here, and saved in this file.
+    #[cfg(target_os = "linux")]
+    linux: Arc<super::LinuxDesktop>,
+    #[cfg(target_os = "linux")]
+    state_file: std::path::PathBuf,
 }
 
 /// What the overlay thread hears: the session started or ended, the agent acted, or a call
@@ -258,7 +263,10 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
     }
     #[cfg(target_os = "linux")]
     {
-        let linux = Arc::new(super::LinuxDesktop::start(None));
+        // Full desktop control is off unless the user turned it on; then the device opens here.
+        let state_file = crate::shell::desktop_file(&crate::config::load_config());
+        let pointer = super::startup_pointer(crate::position::load_full_control(&state_file), open_pointer);
+        let linux = Arc::new(super::LinuxDesktop::start(pointer));
         let desktop: Arc<dyn super::Desktop> = linux.clone();
         let glow = move |mark| { let _ = overlay.send(Overlay::Mark(mark)); };
         let endpoint = start_helper(app, control.clone(), desktop.clone(), glow, working.clone())
@@ -269,11 +277,11 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
             Ok(window) => {
                 let guard = GlowGuard { app: app.clone(), control: control.clone(), hid: AtomicBool::new(false) };
                 linux.set_capture_guard(Arc::new(guard));
-                run_linux_glow(app.clone(), window, linux, control.clone(), working.clone(), marks);
+                run_linux_glow(app.clone(), window, linux.clone(), control.clone(), working.clone(), marks);
             }
             Err(error) => eprintln!("gentle-dot: the computer-control glow is unavailable: {error}"),
         }
-        Computer { control, endpoint, desktop, working }
+        Computer { control, endpoint, desktop, working, linux, state_file }
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
@@ -547,6 +555,12 @@ fn build_linux_glow(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     Ok(window)
 }
 
+/// The overlay comes back after a capture only if it was showing and the session is still on.
+#[cfg(target_os = "linux")]
+fn shows_again(was_showing: bool, session_active: bool) -> bool {
+    was_showing && session_active
+}
+
 /// Hides the overlay for a screenshot and shows it again afterwards, unless the session ended.
 #[cfg(target_os = "linux")]
 struct GlowGuard {
@@ -576,7 +590,7 @@ impl super::CaptureGuard for GlowGuard {
     }
 
     fn restore(&self) {
-        if !self.hid.swap(false, Ordering::SeqCst) || !self.control.is_active(SystemClock.now_ms()) {
+        if !shows_again(self.hid.swap(false, Ordering::SeqCst), self.control.is_active(SystemClock.now_ms())) {
             return;
         }
         if let Some(window) = self.app.get_webview_window(GLOW_WINDOW) {
@@ -697,9 +711,47 @@ pub struct PermissionsAnswer {
     pub panic_shortcut: bool,
 }
 
+#[cfg(target_os = "linux")]
+fn open_pointer() -> Result<Arc<dyn super::Pointer>, String> {
+    super::UinputPointer::open().map(|pointer| Arc::new(pointer) as Arc<dyn super::Pointer>)
+}
+
+/// Asks the native confirmation to turn on full desktop control, refusing by default.
+#[cfg(target_os = "linux")]
+pub const FULL_CONTROL_TEXT: &str = "Turn on full desktop control? Gentle Dot will be able to move the pointer, click, drag, \
+and scroll anywhere on your desktop, in any app, through a virtual input device, while computer control is on. \
+The choice is remembered.";
+#[cfg(target_os = "linux")]
+pub const FULL_CONTROL_CHOICE: Choice = Choice { allow: "Turn On", refuse: "Cancel" };
+
+/// Linux: accessibility is full desktop control, which needs the native confirmation (so it
+/// blocks, off the main thread).
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub async fn computer_request_permission(app: AppHandle, kind: PermissionKind) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let computer = app.try_state::<Computer>().ok_or("Computer control is not ready.")?;
+        let dialogs = NativeDialogs { app: app.clone() };
+        let state_file = computer.state_file.clone();
+        super::request_permission(
+            kind,
+            &computer.linux,
+            &super::FullControl {
+                writable: &super::device_writable,
+                confirm: &|| dialogs.ask(FULL_CONTROL_TEXT, FULL_CONTROL_CHOICE),
+                open: &open_pointer,
+                save: &|on| crate::position::save_full_control(&state_file, on),
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(not(target_os = "linux"))]
 #[tauri::command]
 pub fn computer_request_permission(kind: PermissionKind) -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     return super::request_permission(kind);
     #[cfg(windows)]
     { let _ = kind; Ok(()) }
@@ -806,6 +858,14 @@ mod tests {
         assert_eq!(YOLO_TEXT, "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and Alt+Shift+Esc still work.");
         assert_eq!(YOLO_CHOICE, Choice { allow: "Turn On", refuse: "Cancel" });
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_glow_returns_after_a_capture_only_if_it_was_showing_and_the_session_lasts() {
+        for (was_showing, active, expected) in [(true, true, true), (true, false, false), (false, true, false), (false, false, false)] {
+            assert_eq!(shows_again(was_showing, active), expected, "showing {was_showing}, active {active}");
+        }
     }
 
     #[test]

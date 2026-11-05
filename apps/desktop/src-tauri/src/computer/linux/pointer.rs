@@ -173,17 +173,38 @@ fn route(outputs: &[Rect], from: usize, to: usize) -> Option<Vec<usize>> {
 /// The pointer events that bring the pointer from anywhere to `target` (logical global
 /// pixels). Errors when the target is in no output or cannot be reached through adjacent ones.
 pub fn plan(outputs: &[Rect], target: Point) -> Result<Vec<Step>, String> {
-    let goal = outputs
-        .iter()
-        .position(|out| out.contains(target))
-        .ok_or_else(|| format!("point ({:.0}, {:.0}) is outside every output", target.x, target.y))?;
-
+    let goal = goal_output(outputs, target)?;
     let mut steps = pushes();
     // The pushes end in the layout's top-left corner wherever the pointer began, so the
     // simulation starts from any output.
     let corner = simulate(outputs, centre(outputs[0]), &steps);
-    let mut current = output_at(outputs, corner).expect("outputs is not empty");
+    let current = output_at(outputs, corner).expect("outputs is not empty");
+    steps.extend(hops(outputs, current, goal, target)?);
+    Ok(steps)
+}
 
+/// The events that bring a pointer known to be at `start` to `target`, without the pushes to the
+/// corner: a drag must not drag its item across the layout. Errors when either point is in no
+/// output or the outputs are not connected.
+pub fn plan_from(outputs: &[Rect], start: Point, target: Point) -> Result<Vec<Step>, String> {
+    let goal = goal_output(outputs, target)?;
+    let current = outputs
+        .iter()
+        .position(|out| out.contains(start))
+        .ok_or_else(|| format!("point ({:.0}, {:.0}) is outside every output", start.x, start.y))?;
+    hops(outputs, current, goal, target)
+}
+
+fn goal_output(outputs: &[Rect], target: Point) -> Result<usize, String> {
+    outputs
+        .iter()
+        .position(|out| out.contains(target))
+        .ok_or_else(|| format!("point ({:.0}, {:.0}) is outside every output", target.x, target.y))
+}
+
+/// The hops from output `current` to the one holding `target`, then the move inside it.
+fn hops(outputs: &[Rect], mut current: usize, goal: usize, target: Point) -> Result<Vec<Step>, String> {
+    let mut steps = Vec::new();
     let path = route(outputs, current, goal)
         .ok_or_else(|| "the output holding the target is not connected to the pointer's output".to_owned())?;
     for next in path.into_iter().skip(1) {
@@ -324,5 +345,21 @@ mod tests {
         let abs = [Step::Absolute { x: 0.0, y: 1.0 }];
         assert_eq!(simulate(&outputs, at(2500.0, 300.0), &abs), at(1920.0, 1079.0));
         assert_eq!(simulate(&outputs, at(100.0, 300.0), &abs), at(0.0, 1079.0));
+    }
+
+    #[test]
+    fn plan_from_a_known_start_skips_the_pushes() {
+        let outputs = [HDMI, EDP];
+        let same = plan_from(&outputs, at(100.0, 100.0), at(900.0, 500.0)).unwrap();
+        assert_eq!(same.len(), 1);
+        assert!(matches!(same[0], Step::Absolute { .. }));
+        let across = plan_from(&outputs, at(100.0, 100.0), at(2070.0, 300.0)).unwrap();
+        assert_eq!(across.len(), 3);
+        for (start, target) in [((100.0, 100.0), (2070.0, 300.0)), ((2500.0, 900.0), (5.0, 1070.0)), ((900.0, 5.0), (901.0, 6.0))] {
+            let end = simulate(&outputs, at(start.0, start.1), &plan_from(&outputs, at(start.0, start.1), at(target.0, target.1)).unwrap());
+            assert!((end.x - target.0).abs() <= 1.0 && (end.y - target.1).abs() <= 1.0, "{start:?} -> {end:?}");
+        }
+        assert!(plan_from(&outputs, at(-5.0, 0.0), at(10.0, 10.0)).is_err());
+        assert!(plan_from(&outputs, at(10.0, 10.0), at(4000.0, 10.0)).is_err());
     }
 }

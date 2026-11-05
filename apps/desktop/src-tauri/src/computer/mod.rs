@@ -171,7 +171,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 pub use macos::{request_permission, MacDesktop};
 #[cfg(target_os = "linux")]
-pub use linux::{request_permission, CaptureGuard, LinuxDesktop, Pointer, OVERLAY_GONE};
+pub use linux::{
+    device_writable, request_permission, startup_pointer, CaptureGuard, FullControl, LinuxDesktop, Pointer, UinputPointer,
+    OVERLAY_GONE,
+};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

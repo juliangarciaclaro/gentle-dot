@@ -27,10 +27,17 @@ const CATALOG_REUSE: Duration = Duration::from_secs(60);
 /// The compositor needs a frame or two to take the glow overlay off the screen.
 pub const OVERLAY_GONE: Duration = Duration::from_millis(150);
 
-/// The pointer, once the user turned on full desktop control (T3 provides it).
+/// Why full desktop control cannot be turned on: the account cannot write `/dev/uinput`.
+pub const UDEV_HELP: &str = "Full desktop control needs write access to /dev/uinput, which this account does not have. \
+Add a udev rule such as KERNEL==\"uinput\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\" to \
+/etc/udev/rules.d/60-gentle-dot-uinput.rules, run `sudo udevadm control --reload && sudo udevadm trigger`, \
+then turn it on again.";
+const NOT_CONFIRMED: &str = "Full desktop control stays off.";
+
+/// The pointer, once the user turned on full desktop control (the uinput device).
 pub trait Pointer: Send + Sync {
-    /// Posts a `Move`, `Click`, `Drag`, or `Scroll`.
-    fn post(&self, event: &InputEvent) -> Result<(), String>;
+    /// Posts a `Move`, `Click`, `Drag`, or `Scroll`; `outputs` is the layout it moves over.
+    fn post(&self, event: &InputEvent, outputs: &[super::pointer::Rect]) -> Result<(), String>;
     /// Where the pointer is, when the device knows.
     fn position(&self) -> Option<Point>;
 }
@@ -49,7 +56,8 @@ pub struct LinuxDesktop {
     client: Result<Client, String>,
     portal: Portal,
     catalog: Mutex<(Instant, Arc<Catalog>)>,
-    pointer: Option<Box<dyn Pointer>>,
+    /// Present only while full desktop control is on; nothing moves the pointer without it.
+    pointer: Mutex<Option<Arc<dyn Pointer>>>,
     last_pointer: Mutex<Option<Point>>,
     guard: Mutex<Option<Arc<dyn CaptureGuard>>>,
     own_pid: i32,
@@ -62,7 +70,7 @@ fn load_catalog() -> Catalog {
 impl LinuxDesktop {
     /// Connects for the current session. Never fails: a session that is not supported yields a
     /// desktop that reports itself unavailable.
-    pub fn start(pointer: Option<Box<dyn Pointer>>) -> Self {
+    pub fn start(pointer: Option<Arc<dyn Pointer>>) -> Self {
         let client = match session::detect(|key| std::env::var(key).ok()) {
             Session::Wayland => Client::connect(),
             Session::X11 | Session::None => Err(NO_SESSION.to_string()),
@@ -70,15 +78,42 @@ impl LinuxDesktop {
         if let Err(error) = &client {
             eprintln!("gentle-dot: computer control is limited: {error}");
         }
+        Self::with_client(client, pointer)
+    }
+
+    fn with_client(client: Result<Client, String>, pointer: Option<Arc<dyn Pointer>>) -> Self {
         LinuxDesktop {
             client,
             portal: Portal::default(),
             catalog: Mutex::new((Instant::now(), Arc::new(load_catalog()))),
-            pointer,
+            pointer: Mutex::new(pointer),
             last_pointer: Mutex::new(None),
             guard: Mutex::new(None),
             own_pid: std::process::id() as i32,
         }
+    }
+
+    fn pointer(&self) -> Option<Arc<dyn Pointer>> {
+        self.pointer.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Turns full desktop control on after the user agreed, or explains why not. Nothing is
+    /// opened, saved, or enabled unless every step before it passed (fail closed).
+    pub fn enable_full_control(&self, steps: &FullControl) -> Result<(), String> {
+        if self.pointer().is_some() {
+            return Ok(());
+        }
+        if !(steps.writable)() {
+            return Err(UDEV_HELP.into());
+        }
+        if !(steps.confirm)() {
+            return Err(NOT_CONFIRMED.into());
+        }
+        let pointer = (steps.open)()?;
+        // Saved before it is used: a choice that cannot be remembered is not made.
+        (steps.save)(true).map_err(|e| format!("cannot save the choice: {e}"))?;
+        *self.pointer.lock().unwrap_or_else(|p| p.into_inner()) = Some(pointer);
+        Ok(())
     }
 
     pub fn set_capture_guard(&self, guard: Arc<dyn CaptureGuard>) {
@@ -109,8 +144,7 @@ impl LinuxDesktop {
     }
 
     fn pointer_position(&self) -> Option<Point> {
-        self.pointer
-            .as_ref()
+        self.pointer()
             .and_then(|pointer| pointer.position())
             .or(*self.last_pointer.lock().unwrap_or_else(|p| p.into_inner()))
     }
@@ -192,8 +226,7 @@ impl Desktop for LinuxDesktop {
         let screenshots = self.client.is_ok() && self.portal.available();
         let keyboard = self.client.as_ref().is_ok_and(Client::has_keyboard);
         Permissions {
-            // Input is reachable when both the keyboard and a pointer are.
-            accessibility: keyboard && self.pointer.is_some(),
+            accessibility: input_reachable(keyboard, self.pointer().is_some()),
             screen_recording: screenshots,
             screenshots_supported: screenshots,
             screenshots_unsupported: (!screenshots).then_some(ScreenshotsUnsupported::TooOld),
@@ -220,8 +253,10 @@ impl Desktop for LinuxDesktop {
             InputEvent::Key(combo) => self.send(vec![typing::combo_batch(combo)?]),
             InputEvent::Text(text) => self.send(typing::text_batches(text)?),
             InputEvent::Move(_) | InputEvent::Click { .. } | InputEvent::Drag { .. } | InputEvent::Scroll { .. } => {
-                let pointer = self.pointer.as_ref().ok_or(POINTER_OFF)?;
-                pointer.post(event)?;
+                let pointer = self.pointer().ok_or(POINTER_OFF)?;
+                let (outputs, _) = self.snapshot()?;
+                let layout: Vec<_> = outputs.iter().map(|output| output.rect).collect();
+                pointer.post(event, &layout)?;
                 match event {
                     InputEvent::Move(at) | InputEvent::Click { at, .. } | InputEvent::Scroll { at, .. } => self.note_pointer(*at),
                     InputEvent::Drag { to, .. } => self.note_pointer(*to),
@@ -291,11 +326,178 @@ impl Desktop for LinuxDesktop {
     }
 }
 
+/// Input is reachable when both the keyboard and a pointer are (the macOS Accessibility
+/// counterpart).
+fn input_reachable(keyboard: bool, pointer: bool) -> bool {
+    keyboard && pointer
+}
+
+/// The steps of turning on full desktop control, apart from the desktop so the order is tested.
+pub struct FullControl<'a> {
+    /// `/dev/uinput` can be written (checked without opening it).
+    pub writable: &'a dyn Fn() -> bool,
+    /// The native confirmation, refusing by default.
+    pub confirm: &'a dyn Fn() -> bool,
+    /// Opens the device.
+    pub open: &'a dyn Fn() -> Result<Arc<dyn Pointer>, String>,
+    /// Saves the choice in `desktop.json`.
+    pub save: &'a dyn Fn(bool) -> std::io::Result<()>,
+}
+
+/// The pointer at launch: opened only when the saved choice is on, and a device that will not
+/// open leaves the pointer off.
+pub fn startup_pointer(
+    saved: bool,
+    open: impl FnOnce() -> Result<Arc<dyn Pointer>, String>,
+) -> Option<Arc<dyn Pointer>> {
+    if !saved {
+        return None;
+    }
+    open().map_err(|error| eprintln!("gentle-dot: full desktop control is off: {error}")).ok()
+}
+
 /// `computer_request_permission` on Linux: there is no screen-recording permission to ask for
-/// (the portal decides per request), and full desktop control is not available yet.
-pub fn request_permission(kind: crate::computer::PermissionKind) -> Result<(), String> {
+/// (the portal decides per request); accessibility is full desktop control, turned on after the
+/// native confirmation.
+pub fn request_permission(
+    kind: crate::computer::PermissionKind,
+    desktop: &LinuxDesktop,
+    steps: &FullControl,
+) -> Result<(), String> {
     match kind {
         crate::computer::PermissionKind::ScreenRecording => Ok(()),
-        crate::computer::PermissionKind::Accessibility => Err("Full desktop control is not available yet.".into()),
+        crate::computer::PermissionKind::Accessibility => desktop.enable_full_control(steps),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::computer::linux::pointer::Rect;
+    use crate::computer::MouseButton;
+    use std::cell::{Cell, RefCell};
+
+    struct Fake;
+
+    impl Pointer for Fake {
+        fn post(&self, _event: &InputEvent, _outputs: &[Rect]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn position(&self) -> Option<Point> {
+            None
+        }
+    }
+
+    fn offline(pointer: Option<Arc<dyn Pointer>>) -> LinuxDesktop {
+        LinuxDesktop::with_client(Err("no compositor".into()), pointer)
+    }
+
+    /// Runs `enable_full_control` with the given answers and returns the result and the calls made.
+    fn enable(desktop: &LinuxDesktop, writable: bool, agree: bool, opens: bool, saves: bool) -> (Result<(), String>, Vec<&'static str>) {
+        let calls = RefCell::new(Vec::new());
+        let result = desktop.enable_full_control(&FullControl {
+            writable: &|| {
+                calls.borrow_mut().push("writable");
+                writable
+            },
+            confirm: &|| {
+                calls.borrow_mut().push("confirm");
+                agree
+            },
+            open: &|| {
+                calls.borrow_mut().push("open");
+                if opens { Ok(Arc::new(Fake)) } else { Err("busy".into()) }
+            },
+            save: &|on| {
+                calls.borrow_mut().push(if on { "save" } else { "unsave" });
+                if saves { Ok(()) } else { Err(std::io::Error::other("read-only")) }
+            },
+        });
+        (result, calls.into_inner())
+    }
+
+    #[test]
+    fn pointer_actions_are_refused_while_full_control_is_off() {
+        let desktop = offline(None);
+        let at = Point { x: 1.0, y: 1.0 };
+        for event in [
+            InputEvent::Move(at),
+            InputEvent::Click { at, button: MouseButton::Left, count: 1 },
+            InputEvent::Drag { from: at, to: at },
+            InputEvent::Scroll { at, dx: 0, dy: 5 },
+        ] {
+            assert_eq!(desktop.post(&event), Err(POINTER_OFF.to_string()), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn accessibility_needs_the_keyboard_and_a_pointer() {
+        for (keyboard, pointer, expected) in [(true, true, true), (true, false, false), (false, true, false), (false, false, false)] {
+            assert_eq!(input_reachable(keyboard, pointer), expected, "keyboard {keyboard}, pointer {pointer}");
+        }
+        // Without a compositor there is no keyboard, whatever the pointer.
+        assert!(!offline(Some(Arc::new(Fake))).permissions().accessibility);
+        assert!(!offline(None).permissions().accessibility);
+    }
+
+    #[test]
+    fn turning_on_asks_then_opens_then_saves_then_enables() {
+        let desktop = offline(None);
+        let (result, calls) = enable(&desktop, true, true, true, true);
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls, ["writable", "confirm", "open", "save"]);
+        assert!(desktop.pointer().is_some());
+        // Already on: nothing is asked or opened again.
+        let (result, calls) = enable(&desktop, true, true, true, true);
+        assert_eq!((result, calls.len()), (Ok(()), 0));
+    }
+
+    #[test]
+    fn turning_on_fails_closed_at_every_step() {
+        // (writable, agree, opens, saves) and the last call made before it stopped.
+        for ((writable, agree, opens, saves), last) in [
+            ((false, true, true, true), "writable"),
+            ((true, false, true, true), "confirm"),
+            ((true, true, false, true), "open"),
+            ((true, true, true, false), "save"),
+        ] {
+            let desktop = offline(None);
+            let (result, calls) = enable(&desktop, writable, agree, opens, saves);
+            assert!(result.is_err(), "{last}");
+            assert_eq!(calls.last(), Some(&last));
+            assert!(desktop.pointer().is_none(), "{last} left the pointer on");
+        }
+        // The udev explanation is what the user reads when the device is not writable.
+        let (result, calls) = enable(&offline(None), false, true, true, true);
+        assert_eq!(result, Err(UDEV_HELP.to_string()));
+        assert_eq!(calls, ["writable"]);
+        assert!(UDEV_HELP.contains("TAG+=\"uaccess\""));
+    }
+
+    #[test]
+    fn the_device_is_opened_at_launch_only_when_the_saved_choice_is_on() {
+        let opened = Cell::new(0);
+        let open = || {
+            opened.set(opened.get() + 1);
+            Ok(Arc::new(Fake) as Arc<dyn Pointer>)
+        };
+        assert!(startup_pointer(false, open).is_none());
+        assert_eq!(opened.get(), 0);
+        assert!(startup_pointer(true, open).is_some());
+        assert_eq!(opened.get(), 1);
+        assert!(startup_pointer(true, || Err("denied".into())).is_none());
+    }
+
+    #[test]
+    fn only_accessibility_asks_for_full_control() {
+        let desktop = offline(None);
+        let steps = FullControl {
+            writable: &|| panic!("screen recording asks nothing"),
+            confirm: &|| panic!("screen recording asks nothing"),
+            open: &|| panic!("screen recording opens nothing"),
+            save: &|_| panic!("screen recording saves nothing"),
+        };
+        assert_eq!(request_permission(crate::computer::PermissionKind::ScreenRecording, &desktop, &steps), Ok(()));
     }
 }

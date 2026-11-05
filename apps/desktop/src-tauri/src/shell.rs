@@ -166,7 +166,7 @@ fn rose_menu_label(hidden: bool) -> &'static str {
     }
 }
 
-fn desktop_file(config: &DesktopConfig) -> PathBuf {
+pub(crate) fn desktop_file(config: &DesktopConfig) -> PathBuf {
     config.data_dir.join("desktop.json")
 }
 
