@@ -203,6 +203,28 @@ fn ends_at(event: &InputEvent) -> Option<Point> {
     }
 }
 
+/// Where the pointer last went, and the turn that keeps two actions from interleaving.
+#[derive(Default)]
+struct Played {
+    /// Held for a whole action (its pauses included): the only thing it blocks is another action.
+    turn: std::sync::Mutex<()>,
+    last: std::sync::Mutex<Option<Point>>,
+}
+
+impl Played {
+    /// Plays one action; the point it ends at is remembered only when it played through.
+    fn run(&self, play: impl FnOnce() -> Result<(), String>, ends: Option<Point>) -> Result<(), String> {
+        let _turn = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+        play()?;
+        *self.last.lock().unwrap_or_else(|p| p.into_inner()) = ends;
+        Ok(())
+    }
+
+    fn position(&self) -> Option<Point> {
+        *self.last.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use device::{device_writable, UinputPointer};
 
@@ -214,7 +236,6 @@ mod device {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
-    use std::sync::Mutex;
 
     const PATH: &str = "/dev/uinput";
     const BUS_VIRTUAL: u16 = 6;
@@ -338,8 +359,8 @@ mod device {
     pub struct UinputPointer {
         absolute: Dev,
         relative: Dev,
-        /// Held while an event plays, so two events never interleave; the last point reached.
-        last: Mutex<Option<Point>>,
+        /// Serializes events (two never interleave) and holds the last point reached.
+        played: Played,
     }
 
     impl UinputPointer {
@@ -347,7 +368,7 @@ mod device {
             let absolute = Dev::create(Device::Absolute)?;
             let relative = Dev::create(Device::Relative)?;
             std::thread::sleep(ENUMERATE);
-            Ok(UinputPointer { absolute, relative, last: Mutex::new(None) })
+            Ok(UinputPointer { absolute, relative, played: Played::default() })
         }
 
         fn play(&self, actions: &[Action]) -> Result<(), String> {
@@ -368,23 +389,25 @@ mod device {
         fn post(&self, event: &InputEvent, outputs: &[Rect]) -> Result<(), String> {
             // Everything is checked before the first event, so a refusal sends nothing.
             let actions = actions(event, outputs)?;
-            let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
-            let played = self.play(&actions);
-            if played.is_err() {
-                // Never leave a button held down.
-                for button in [MouseButton::Left, MouseButton::Right] {
-                    if let Action::Frame(frame) = button_frame(button, false) {
-                        let _ = self.relative.send(&frame);
+            self.played.run(
+                || {
+                    let played = self.play(&actions);
+                    if played.is_err() {
+                        // Never leave a button held down.
+                        for button in [MouseButton::Left, MouseButton::Right] {
+                            if let Action::Frame(frame) = button_frame(button, false) {
+                                let _ = self.relative.send(&frame);
+                            }
+                        }
                     }
-                }
-            }
-            played?;
-            *last = ends_at(event);
-            Ok(())
+                    played
+                },
+                ends_at(event),
+            )
         }
 
         fn position(&self) -> Option<Point> {
-            *self.last.lock().unwrap_or_else(|p| p.into_inner())
+            self.played.position()
         }
     }
 }
@@ -409,6 +432,45 @@ mod tests {
             .iter()
             .flat_map(|f| f.events.iter().filter(|e| e.0 == 1).map(|e| (e.1, e.2)))
             .collect()
+    }
+
+    #[test]
+    fn a_playing_action_does_not_block_readers_but_actions_stay_serialized() {
+        use std::sync::mpsc::{channel, sync_channel};
+        use std::sync::Arc;
+        let played = Arc::new(Played::default());
+        let (started, running) = sync_channel::<()>(0);
+        let (release, gate) = channel::<()>();
+        let first = {
+            let played = played.clone();
+            std::thread::spawn(move || {
+                played.run(move || {
+                    started.send(()).unwrap();
+                    gate.recv().ok();
+                    Ok(())
+                }, Some(at(1.0, 1.0)))
+            })
+        };
+        running.recv().unwrap();
+        // The position is readable while the action plays.
+        let (seen, position) = channel();
+        let reader = played.clone();
+        std::thread::spawn(move || seen.send(reader.position()).ok());
+        assert_eq!(position.recv_timeout(Duration::from_secs(2)), Ok(None), "position blocked during play");
+        // A second action waits for the first, so they never interleave.
+        let (entered, second_in) = channel();
+        let second = {
+            let played = played.clone();
+            std::thread::spawn(move || played.run(move || { entered.send(()).unwrap(); Ok(()) }, Some(at(2.0, 2.0))))
+        };
+        assert!(second_in.recv_timeout(Duration::from_millis(100)).is_err(), "two actions interleaved");
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Ok(()));
+        assert_eq!(second.join().unwrap(), Ok(()));
+        assert_eq!(played.position(), Some(at(2.0, 2.0)));
+        // A failed action leaves the last point as it was.
+        assert!(played.run(|| Err("write failed".into()), Some(at(9.0, 9.0))).is_err());
+        assert_eq!(played.position(), Some(at(2.0, 2.0)));
     }
 
     #[test]

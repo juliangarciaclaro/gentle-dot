@@ -58,6 +58,8 @@ pub struct LinuxDesktop {
     catalog: Mutex<(Instant, Arc<Catalog>)>,
     /// Present only while full desktop control is on; nothing moves the pointer without it.
     pointer: Mutex<Option<Arc<dyn Pointer>>>,
+    /// Held while full desktop control is being turned on, so two calls never open two devices.
+    enabling: Mutex<()>,
     last_pointer: Mutex<Option<Point>>,
     guard: Mutex<Option<Arc<dyn CaptureGuard>>>,
     own_pid: i32,
@@ -87,6 +89,7 @@ impl LinuxDesktop {
             portal: Portal::default(),
             catalog: Mutex::new((Instant::now(), Arc::new(load_catalog()))),
             pointer: Mutex::new(pointer),
+            enabling: Mutex::new(()),
             last_pointer: Mutex::new(None),
             guard: Mutex::new(None),
             own_pid: std::process::id() as i32,
@@ -100,6 +103,8 @@ impl LinuxDesktop {
     /// Turns full desktop control on after the user agreed, or explains why not. Nothing is
     /// opened, saved, or enabled unless every step before it passed (fail closed).
     pub fn enable_full_control(&self, steps: &FullControl) -> Result<(), String> {
+        // A second call waits for the first, then finds the pointer on and opens nothing.
+        let _single_flight = self.enabling.lock().unwrap_or_else(|p| p.into_inner());
         if self.pointer().is_some() {
             return Ok(());
         }
@@ -451,6 +456,38 @@ mod tests {
         // Already on: nothing is asked or opened again.
         let (result, calls) = enable(&desktop, true, true, true, true);
         assert_eq!((result, calls.len()), (Ok(()), 0));
+    }
+
+    #[test]
+    fn two_concurrent_turn_ons_open_one_device() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let desktop = offline(None);
+        let (opens, saves) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    let result = desktop.enable_full_control(&FullControl {
+                        writable: &|| true,
+                        // Long enough for the other call to reach its own check.
+                        confirm: &|| {
+                            std::thread::sleep(Duration::from_millis(100));
+                            true
+                        },
+                        open: &|| {
+                            opens.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::new(Fake))
+                        },
+                        save: &|_| {
+                            saves.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    });
+                    assert_eq!(result, Ok(()));
+                });
+            }
+        });
+        assert_eq!((opens.into_inner(), saves.into_inner()), (1, 1));
+        assert!(desktop.pointer().is_some());
     }
 
     #[test]

@@ -6,8 +6,7 @@
 use super::shot::{request_path, response_file};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::mpsc::channel;
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::zvariant::{OwnedValue, Value};
@@ -53,12 +52,21 @@ impl Drop for Wait {
 
 /// Runs `work` on a thread of its own and waits at most `limit` for its result. A result that
 /// arrives after the wait gave up goes to `discard` instead, so what it holds is not leaked.
+/// Exactly one side owns the result: whoever finds the other already done under the lock.
 fn within<T: Send + 'static>(
     limit: Duration,
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
     discard: impl FnOnce(T) + Send + 'static,
 ) -> Result<T, String> {
     within_capped(MAX_WAITS, limit, work, discard)
+}
+
+/// Where the worker leaves its result for the caller.
+enum Slot<T> {
+    Waiting,
+    Done(Result<T, String>),
+    /// The caller gave up; the worker keeps the result and discards it.
+    GaveUp,
 }
 
 fn within_capped<T: Send + 'static>(
@@ -68,17 +76,40 @@ fn within_capped<T: Send + 'static>(
     discard: impl FnOnce(T) + Send + 'static,
 ) -> Result<T, String> {
     let wait = Wait::begin(cap).ok_or("the screenshot portal is still busy with earlier requests")?;
-    let (done, result) = channel();
+    let slot = Arc::new((Mutex::new(Slot::Waiting), Condvar::new()));
+    let shared = slot.clone();
     std::thread::Builder::new()
         .name("computer-portal".into())
         .spawn(move || {
             let _wait = wait;
-            if let Err(std::sync::mpsc::SendError(Ok(value))) = done.send(work()) {
-                discard(value);
+            let outcome = work();
+            let (state, ready) = &*shared;
+            let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+            if matches!(*state, Slot::GaveUp) {
+                drop(state);
+                if let Ok(value) = outcome {
+                    discard(value);
+                }
+            } else {
+                *state = Slot::Done(outcome);
+                ready.notify_one();
             }
         })
         .map_err(|e| format!("cannot start a thread: {e}"))?;
-    result.recv_timeout(limit).map_err(|_| "the screenshot portal did not answer in time".to_string())?
+    let (state, ready) = &*slot;
+    let deadline = Instant::now() + limit;
+    let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+    while matches!(*state, Slot::Waiting) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else {
+            *state = Slot::GaveUp;
+            return Err("the screenshot portal did not answer in time".to_string());
+        };
+        state = ready.wait_timeout(state, left).unwrap_or_else(|p| p.into_inner()).0;
+    }
+    match std::mem::replace(&mut *state, Slot::GaveUp) {
+        Slot::Done(outcome) => outcome,
+        Slot::Waiting | Slot::GaveUp => unreachable!("the wait only ends on a result"),
+    }
 }
 
 #[derive(Default)]
@@ -171,10 +202,39 @@ fn request_screenshot(connection: &Connection) -> Result<std::path::PathBuf, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::sync_channel;
+    use std::sync::mpsc::{channel, sync_channel};
+
+    /// The wait counter is global, so the tests that count on it run one at a time.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn every_result_is_either_returned_or_discarded_never_dropped() {
+        use std::sync::atomic::AtomicUsize;
+        const RUNS: usize = 300;
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let discarded = Arc::new(AtomicUsize::new(0));
+        let mut returned = 0;
+        for i in 0..RUNS {
+            let seen = discarded.clone();
+            // The answer lands within a hair of the deadline, which is where it used to be lost.
+            let pause = Duration::from_micros(500 + (i as u64 % 7) * 50);
+            let result = within_capped(1000, Duration::from_micros(600), move || {
+                std::thread::sleep(pause);
+                Ok(i)
+            }, move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+            });
+            returned += usize::from(result.is_ok());
+        }
+        while WAITS.load(Ordering::Acquire) != 0 {
+            std::thread::yield_now();
+        }
+        assert_eq!(returned + discarded.load(Ordering::SeqCst), RUNS, "a result was dropped without being handed to `discard`");
+    }
 
     #[test]
     fn a_late_answer_is_discarded_and_waits_are_capped() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Late: the caller gives up, then the work finishes and its result reaches `discard`.
         let (release, gate) = sync_channel::<()>(0);
         let (late, seen) = channel();
