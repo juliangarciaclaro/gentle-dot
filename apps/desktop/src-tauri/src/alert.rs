@@ -303,18 +303,23 @@ mod linux {
             if let Some(answer) = answer.borrow_mut().take() {
                 let _ = answer.send(Some(gtk::glib::translate::IntoGlib::into_glib(response)));
             }
-            dialog.close();
+            // Not `close()`: its delete-event answers `DeleteEvent` again and the dialog stays up.
+            // SAFETY: on the main thread, and nothing uses the dialog after its answer.
+            unsafe { dialog.destroy() };
         });
         // The dialog's own timer refuses it when asked for or once its deadline passes.
         gtk::glib::timeout_add_local(Duration::from_millis(200), {
             let dialog = dialog.clone();
             move || {
+                // Stops once the dialog is gone (answered and destroyed).
+                if !dialog.is_visible() {
+                    return gtk::glib::ControlFlow::Break;
+                }
                 if refuse_due(requested.load(Ordering::SeqCst), deadline, Instant::now()) {
                     dialog.response(gtk::ResponseType::Other(GTK_REFUSE_ID));
                     return gtk::glib::ControlFlow::Break;
                 }
-                // Stops once the dialog is gone.
-                if dialog.is_visible() { gtk::glib::ControlFlow::Continue } else { gtk::glib::ControlFlow::Break }
+                gtk::glib::ControlFlow::Continue
             }
         });
         dialog.present();
