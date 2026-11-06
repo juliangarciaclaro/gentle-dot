@@ -81,6 +81,13 @@ pub fn compositor_places_windows(env: impl Fn(&str) -> Option<String>) -> bool {
     }
 }
 
+/// Whether the Dot and the panel become layer surfaces (S9): native Wayland (the compositor
+/// places windows), not Hyprland (its window rules do that), and a compositor that offers
+/// `zwlr_layer_shell_v1` (`layer_shell_supported`, read from gtk-layer-shell once GTK is up).
+pub fn uses_layer_shell(os: Os, env: impl Fn(&str) -> Option<String>, layer_shell_supported: bool) -> bool {
+    os == Os::Linux && layer_shell_supported && os.compositor_places_windows(&env) && !is_hyprland(&env)
+}
+
 /// What a launch asks for: `--toggle` toggles the panel (bind it to a desktop shortcut);
 /// any other launch shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +181,34 @@ mod tests {
         assert!(!compositor_places_windows(env_of(x11)));
         assert_eq!(forced_gdk_backend(env_of(&[])), None);
         assert!(!compositor_places_windows(env_of(&[])));
+    }
+
+    #[test]
+    fn layer_shell_is_for_native_wayland_compositors_other_than_hyprland() {
+        let cosmic: &[(&str, &str)] = &[
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("DISPLAY", ":1"),
+            ("XDG_CURRENT_DESKTOP", "COSMIC"),
+            ("GDK_BACKEND", "wayland,x11"),
+        ];
+        let hyprland: &[(&str, &str)] =
+            &[("WAYLAND_DISPLAY", "wayland-1"), ("DISPLAY", ":1"), ("HYPRLAND_INSTANCE_SIGNATURE", "abc")];
+        let xwayland: &[(&str, &str)] = &[("WAYLAND_DISPLAY", "wayland-0"), ("DISPLAY", ":0"), ("GDK_BACKEND", "x11")];
+        let x11: &[(&str, &str)] = &[("XDG_SESSION_TYPE", "x11"), ("DISPLAY", ":0")];
+        // (os, session as seen after `forced_gdk_backend`, layer shell supported, expected)
+        let cases = [
+            (Os::Linux, cosmic, true, true),
+            (Os::Linux, cosmic, false, false),
+            (Os::Linux, hyprland, true, false),
+            (Os::Linux, xwayland, true, false),
+            (Os::Linux, x11, true, false),
+            (Os::MacOs, cosmic, true, false),
+            (Os::Windows, cosmic, true, false),
+        ];
+        for (os, session, supported, expected) in cases {
+            assert_eq!(uses_layer_shell(os, env_of(session), supported), expected, "{os:?} {session:?} {supported}");
+        }
     }
 
     #[test]

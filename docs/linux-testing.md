@@ -2,15 +2,16 @@
 
 Thanks for testing! This guide walks you through installing Gentle Dot, from a package or from source, and checking that it works on your desktop. With a package it takes about 20 minutes; from source, about 30, most of it waiting for the first build.
 
-We test three setups. Pick the one you have:
+We test these setups. Pick the one you have:
 
 | Setup | Desktop | Session | How the app runs |
 |---|---|---|---|
 | **A. Debian 12 or 13** | GNOME | Wayland (default) | Under XWayland, set automatically |
 | **B. Ubuntu 24.04 or later** | GNOME | Wayland (default) | Under XWayland, set automatically |
 | **C. Omarchy** (Arch) | Hyprland | Wayland | Native Wayland, with window rules you paste |
+| **D. Pop!_OS 24.04** | COSMIC | Wayland | Native Wayland; the rose and the panel are layer-shell surfaces the app places itself |
 
-The tray icon, the floating rose, the panel, and the toggle shortcut should work on all three. Where Wayland does not allow something, there is a workaround, explained below.
+The tray icon, the floating rose, the panel, and the toggle shortcut should work on all of them. Where Wayland does not allow something, there is a workaround, explained below.
 
 ## Before you start
 
@@ -48,12 +49,12 @@ You can run the script again at any time; it skips what is already done. `script
 
 ## How the app handles Wayland
 
-| Topic | GNOME (Debian, Ubuntu) | Hyprland (Omarchy) |
-|---|---|---|
-| Window placement, always on top, snapping to the edge | Work, because the app runs under XWayland | Done by the window rules you paste in step 3C. Snapping to the edge does not happen. |
-| Global shortcut | Add a custom shortcut in GNOME Settings (step 7) | `SUPER + ALT + D`, from the binding you paste in step 3C |
-| Tray icon | Needs the AppIndicator extension. Ubuntu has it on already; Debian needs it enabled (step 6). | Shown by Waybar |
-| Panel background | Solid dark, with no blur behind it | Same |
+| Topic | GNOME (Debian, Ubuntu) | Hyprland (Omarchy) | COSMIC (Pop!_OS) |
+|---|---|---|---|
+| Window placement, always on top, snapping to the edge | Work, because the app runs under XWayland | Done by the window rules you paste in step 3C. Snapping to the edge does not happen. | Work through the layer shell (`zwlr_layer_shell_v1`): the rose is an overlay layer surface, the panel a top layer one, and the app places both by their margins on an output, drags the rose itself, and snaps it |
+| Global shortcut | Add a custom shortcut in GNOME Settings (step 7) | `SUPER + ALT + D`, from the binding you paste in step 3C | Add a custom shortcut in COSMIC Settings that runs `gentle-dot --toggle` |
+| Tray icon | Needs the AppIndicator extension. Ubuntu has it on already; Debian needs it enabled (step 6). | Shown by Waybar | Shown by the COSMIC panel |
+| Panel background | Solid dark, with no blur behind it | Same | Same |
 
 `gentle-dot --toggle` shows or hides the panel of the running app. If the app is not running, the command starts it and opens the panel.
 
@@ -68,7 +69,7 @@ Do each step in order and note **Pass**, **Fail**, or **Partial** for each one. 
 | A. Debian or B. Ubuntu | `sudo apt install ./gentle-dot_<version>_<arch>.deb` | `scripts/linux/setup-debian.sh` |
 | C. Omarchy | `sudo pacman -U gentle-dot-<version>-1-x86_64.pkg.tar.zst` | `scripts/linux/setup-arch.sh` |
 
-**Expected with a package:** the package manager lists the libraries it adds (WebKitGTK and tray support), installs them, and finishes without errors. With `apt`, keep the `./` in front of the file name. A note that `_apt` could not access the file is harmless.
+**Expected with a package:** the package manager lists the libraries it adds (WebKitGTK, tray support, and gtk-layer-shell), installs them, and finishes without errors. With `apt`, keep the `./` in front of the file name. A note that `_apt` could not access the file is harmless.
 
 **Expected from source:** each step prints a numbered heading (`==> 1. Checking the system` and so on). The script explains why it needs sudo before it asks for your password. It ends with `Done.` and asks "Start Gentle Dot now?". Answer **no** for now.
 
@@ -107,12 +108,13 @@ Open **Gentle Dot** from your app menu (or run the app command in a terminal, wh
 - After up to 20 seconds the rose stops looking dimmed: the assistant is ready.
 - Around the circle, the desktop shows through. A black or white square around the circle is a **Fail**: write down your GPU and driver.
 - **Hyprland:** the rose has no border, shadow, or blur.
+- **COSMIC:** the rose starts at the right edge of the primary screen, or where you left it last time, pulled to the nearest edge.
 
 ### 5. The rose stays on top
 
 Open a few other windows and click on them. Switch to another workspace.
 
-**Expected:** the rose stays above the other windows and appears on every workspace.
+**Expected:** the rose stays above the other windows and appears on every workspace. **COSMIC:** this includes clicking the app behind it: the rose does not go to the background.
 
 ### 6. Drag and snap
 
@@ -120,13 +122,14 @@ Drag the rose to the middle of the screen and let go.
 
 **Expected:**
 - **GNOME:** within half a second, the rose moves to the nearest screen edge, 12 px away from it. Quit and reopen the app (step 13): the rose comes back where you left it.
+- **COSMIC:** the rose follows the pointer from the very first click (no second try), and when you let go it moves to the nearest edge of that screen, 12 px away. On several screens it snaps to the edge of the screen it is on. After a restart it comes back where you left it.
 - **Hyprland:** the rose moves with the pointer and stays where you drop it (no snapping). After a restart it goes back to the position from the window rules.
 
 ### 7. Click opens the panel
 
 Click the rose (without dragging).
 
-**Expected:** a 420 × 640 dark panel opens next to the rose, and the cursor is in the message box. The panel background is solid dark, not see-through. Press `Esc`: the panel hides. Click the rose again: it opens again.
+**Expected:** a 420 × 640 dark panel opens next to the rose, and the cursor is in the message box. The panel background is solid dark, not see-through. Press `Esc`: the panel hides. Click the rose again: it opens again. **COSMIC:** the panel opens on the side of the rose with more room, centered on it. Drag the rose while the panel is open: the panel follows when you let go. Hide the panel, drag the rose far away, and open it again: it opens next to the rose, not where it was.
 
 ### 8. Tray icon and menu
 
@@ -237,7 +240,7 @@ Then check each of these and note any that fail:
 
 ## Reporting Wayland limitations
 
-Some things Wayland does not allow at all, and we already work around them: apps cannot place their own windows, stay on top by themselves, or register global shortcuts. If you notice something else that does not work the same way as on other systems, write in the report:
+Some things Wayland does not allow at all, and we already work around them: apps cannot place their own windows (except through the layer shell, which Gentle Dot uses where the desktop has it), stay on top by themselves, or register global shortcuts. If you notice something else that does not work the same way as on other systems, write in the report:
 
 1. what you did,
 2. what you expected,

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { AgentState } from "@gentle-dot/protocol";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DotSurface } from "../src/components/DotSurface.tsx";
 import { DOT_LIGHT_STROKES, ROSE_DISC_VIEWBOX } from "../src/rose/Rose.tsx";
 import { ROSE_SPARKLES, ROSE_STROKES } from "../src/rose/strokes.ts";
@@ -14,7 +14,19 @@ function setup(agentState: AgentState = "idle", connected = true) {
 	return { toggle, startDrag, dot: screen.getByRole("button") };
 }
 
+/** Animation frames that run only when the test says so. */
+function manualFrames() {
+	const queue: FrameRequestCallback[] = [];
+	vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => queue.push(callback));
+	vi.stubGlobal("cancelAnimationFrame", () => queue.splice(0));
+	return () => {
+		for (const callback of queue.splice(0)) callback(0);
+	};
+}
+
 describe("DotSurface", () => {
+	afterEach(() => vi.unstubAllGlobals());
+
 	it("opens the panel on click", () => {
 		const { toggle, startDrag, dot } = setup();
 		fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
@@ -30,6 +42,54 @@ describe("DotSurface", () => {
 		fireEvent.pointerUp(dot, { clientX: 20, clientY: 18, button: 0 });
 		expect(startDrag).toHaveBeenCalledTimes(1);
 		expect(toggle).not.toHaveBeenCalled();
+	});
+
+	describe("where the Dot is a layer surface", () => {
+		function layerSetup() {
+			const toggle = vi.fn();
+			const startDrag = vi.fn();
+			const layerDrag = { by: vi.fn(() => Promise.resolve()), end: vi.fn() };
+			render(
+				<DotSurface
+					agentState="idle"
+					connected
+					toggle={toggle}
+					startDrag={startDrag}
+					layerDrag={layerDrag}
+				/>,
+			);
+			const dot = screen.getByRole("button");
+			const capture = vi.fn();
+			Object.assign(dot, { setPointerCapture: capture });
+			return { toggle, startDrag, layerDrag, capture, dot };
+		}
+
+		it("captures the pointer and sends the offset since the press once per frame", () => {
+			const runFrame = manualFrames();
+			const { toggle, startDrag, layerDrag, capture, dot } = layerSetup();
+			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0, pointerId: 4 });
+			fireEvent.pointerMove(dot, { clientX: 20, clientY: 18, button: 0, pointerId: 4 });
+			fireEvent.pointerMove(dot, { clientX: 25, clientY: 14, button: 0, pointerId: 4 });
+			expect(capture).toHaveBeenCalledWith(4);
+			expect(layerDrag.by).not.toHaveBeenCalled();
+			runFrame();
+			expect(layerDrag.by).toHaveBeenCalledTimes(1);
+			expect(layerDrag.by).toHaveBeenCalledWith(15, 4);
+			fireEvent.pointerUp(dot, { clientX: 25, clientY: 14, button: 0, pointerId: 4 });
+			expect(layerDrag.end).toHaveBeenCalledTimes(1);
+			expect(startDrag).not.toHaveBeenCalled();
+			expect(toggle).not.toHaveBeenCalled();
+		});
+
+		it("still opens the panel on a click", () => {
+			const { toggle, layerDrag, dot } = layerSetup();
+			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
+			fireEvent.pointerMove(dot, { clientX: 12, clientY: 11, button: 0 });
+			fireEvent.pointerUp(dot, { clientX: 12, clientY: 11, button: 0 });
+			expect(toggle).toHaveBeenCalledTimes(1);
+			expect(layerDrag.by).not.toHaveBeenCalled();
+			expect(layerDrag.end).not.toHaveBeenCalled();
+		});
 	});
 
 	it("opens from the keyboard", () => {

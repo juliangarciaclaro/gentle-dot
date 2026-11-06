@@ -39,6 +39,24 @@ export function openUrl(url: string): void {
 	window.open(url, "_blank", "noopener,noreferrer");
 }
 
+/**
+ * Whether the app moves the Dot itself (Wayland layer surface, S9), which `startDragging` cannot:
+ * then the UI sends its pointer movement with `dragDotBy` and ends with `endDotDrag`.
+ */
+export function dotDragsByLayer(): Promise<boolean> {
+	return invoke<boolean>("dot_drag_mode");
+}
+
+/** Moves the Dot by the pointer's movement since the press, in points. */
+export function dragDotBy(dx: number, dy: number): Promise<void> {
+	return invoke<void>("drag_dot_by", { dx, dy });
+}
+
+/** The pointer was released: the app snaps the Dot to the nearest edge and saves its place. */
+export function endDotDrag(): void {
+	void invoke("end_dot_drag");
+}
+
 export async function startDragging(): Promise<void> {
 	const { getCurrentWindow } = await import("@tauri-apps/api/window");
 	await getCurrentWindow().startDragging();

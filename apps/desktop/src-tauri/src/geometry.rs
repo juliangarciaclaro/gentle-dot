@@ -94,6 +94,15 @@ pub fn snap_to_edge(window: Rect, monitors: &[Rect], margin: i32) -> (i32, i32) 
     }
 }
 
+/// Where a layer surface (S9) sits so its top-left corner is at `window`'s: the output it is on
+/// (an index into `outputs`, chosen like `monitor_for`) and its `Top` + `Left` margins from that
+/// output's origin. Layer surfaces are placed by margins on one output, never by global position.
+pub fn layer_margins(window: Rect, outputs: &[Rect]) -> Option<(usize, (i32, i32))> {
+    let output = monitor_for(window, outputs)?;
+    let index = outputs.iter().position(|o| *o == output)?;
+    Some((index, (window.x - output.x, window.y - output.y)))
+}
+
 /// Right edge, vertically centered.
 pub fn default_dot_position(monitor: Rect, size: (i32, i32), margin: i32) -> (i32, i32) {
     (monitor.right() - size.0 - margin, monitor.y + (monitor.height - size.1) / 2)
@@ -226,6 +235,25 @@ mod tests {
     /// A window taller than wide: snapping must use its real size, whatever the shape.
     fn rose(x: i32, y: i32) -> Rect {
         Rect::new(x, y, 128, 168)
+    }
+
+    #[test]
+    fn layer_margins_are_relative_to_the_output_the_window_is_on() {
+        let right = Rect::new(1920, -200, 2560, 1440);
+        let left = Rect::new(-1440, 0, 1440, 900);
+        let outputs = [SCREEN, right, left];
+        // (window, expected output index, expected margins)
+        let cases = [
+            (dot(12, 500), 0, (12, 500)),
+            (dot(4400, 100), 1, (2480, 300)),
+            (dot(-1300, 40), 2, (140, 40)),
+            // The center decides: mostly on the right output, so its margins may be negative.
+            (dot(1900, 10), 1, (-20, 210)),
+        ];
+        for (window, index, margins) in cases {
+            assert_eq!(layer_margins(window, &outputs), Some((index, margins)), "{window:?}");
+        }
+        assert_eq!(layer_margins(dot(0, 0), &[]), None);
     }
 
     #[test]

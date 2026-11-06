@@ -9,6 +9,9 @@ import { computerPermissions, requestComputerPermission, setComputerYolo, stopCo
 import {
 	connectionInfo,
 	connectorCommand,
+	dotDragsByLayer,
+	dragDotBy,
+	endDotDrag,
 	hidePanel,
 	inDesktop,
 	onDesktopEvent,
@@ -172,6 +175,20 @@ function Assistant({ surface }: { surface: Surface }) {
 		};
 	}, [surface, send, fullscreenNow, setFullscreen]);
 
+	// Where the Dot is a layer surface (S9) the app cannot start a window drag; it asks first.
+	const [layerDrag, setLayerDrag] = useState(false);
+	useEffect(() => {
+		if (surface !== "dot" || !inDesktop()) return;
+		let live = true;
+		dotDragsByLayer().then(
+			(layer) => live && setLayerDrag(layer),
+			() => {},
+		);
+		return () => {
+			live = false;
+		};
+	}, [surface]);
+
 	useEffect(() => {
 		document.documentElement.dataset.surface = surface;
 		document.documentElement.dataset.effects = windowEffects(window.location.search);
@@ -186,6 +203,7 @@ function Assistant({ surface }: { surface: Surface }) {
 				yolo={yolo !== undefined}
 				toggle={togglePanel}
 				startDrag={() => void startDragging()}
+				layerDrag={layerDrag ? { by: dragDotBy, end: endDotDrag } : undefined}
 			/>
 		);
 	}

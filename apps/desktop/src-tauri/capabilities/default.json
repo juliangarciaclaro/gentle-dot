@@ -26,6 +26,12 @@
 			]
 		},
 		{
+			"identifier": "layer-dot",
+			"description": "How the Dot is dragged where it is a layer surface (Wayland, S9): the Dot asks whether to, then reports its own pointer movement; the panel never moves the Dot.",
+			"windows": ["dot"],
+			"permissions": ["allow-dot-drag-mode", "allow-drag-dot-by", "allow-end-dot-drag"]
+		},
+		{
 			"identifier": "voice",
 			"description": "Voice input (S30.1, S30.5): the panel's mic button records and transcribes natively, and the panel downloads, cancels, and removes the optional local voice model; the Dot never records.",
 			"windows": ["panel"],

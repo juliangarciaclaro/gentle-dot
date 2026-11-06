@@ -48,6 +48,8 @@ const PANEL_SIZE: (f64, f64) = (420.0, 640.0);
 /// All placement runs in points (see `geometry`), so margins never depend on a scale factor.
 const EDGE_MARGIN: i32 = 12;
 const PANEL_GAP: i32 = 8;
+/// The most a layer Dot moves for one drag message, in points.
+const DRAG_STEP_MAX: f64 = 4000.0;
 const DRAG_SETTLE: Duration = Duration::from_millis(300);
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 /// Sent to the Dot and the panel each time the assistant this app may use starts answering (at
@@ -69,6 +71,17 @@ struct Shell {
     full_screen: Mutex<Option<Rect>>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
+    /// Set when the Dot and the panel are layer surfaces (S9).
+    layer: Option<LayerState>,
+}
+
+/// Where the app keeps the Dot and the panel in layer mode, in global points: a layer surface has
+/// no position of its own that tao could read or set, only margins on its output (`layer`).
+#[derive(Default)]
+struct LayerState {
+    dot: Mutex<(i32, i32)>,
+    /// Where the panel was last placed; `None` until its first show.
+    panel: Mutex<Option<(i32, i32)>>,
 }
 
 /// The Dot and the panel as computer control hides them during a call (S1, S5): never through
@@ -266,8 +279,12 @@ fn hide_panel(app: AppHandle) -> CommandResult {
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
     if shell.full_screen.lock().unwrap().is_none() {
-        if let Ok(rect) = rect_of(&panel) {
-            *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
+        let spot = match &shell.layer {
+            Some(layer) => *layer.panel.lock().unwrap(),
+            None => rect_of(&panel).ok().map(|rect| (rect.x, rect.y)),
+        };
+        if spot.is_some() {
+            *shell.panel_spot.lock().unwrap() = spot;
         }
     }
     #[cfg(windows)]
@@ -312,6 +329,9 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
 fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
+    if shell.layer.is_some() {
+        return set_layer_fullscreen(&app, on);
+    }
     let mut full_screen = shell.full_screen.lock().unwrap();
     let monitors = monitor_rects(&panel)?;
     match (on, *full_screen) {
@@ -477,6 +497,9 @@ fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
 fn place_panel(app: &AppHandle) -> CommandResult {
     let shell = app.state::<Shell>();
     let full_screen = shell.full_screen.lock().unwrap().is_some();
+    if let Some(layer) = &shell.layer {
+        return place_layer_panel(app, layer, panel_placement(true, full_screen, shell.rose_hidden.load(Ordering::SeqCst)));
+    }
     match panel_placement(shell.places_windows, full_screen, shell.rose_hidden.load(Ordering::SeqCst)) {
         Placement::Keep => Ok(()),
         Placement::BesideDot => place_panel_next_to_dot(app),
@@ -505,6 +528,191 @@ fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
     let size = (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32);
     let position = geometry::place_panel(dot_rect, size, monitor, PANEL_GAP, EDGE_MARGIN);
     move_to(&panel, position)
+}
+
+// Layer mode (S9): the Dot and the panel are layer surfaces placed by margins on their output, so
+// the app keeps their global positions (`LayerState`) and every move goes through `layer::place`.
+
+/// Where the layer panel goes on each show, in global points: beside the Dot, or alone at its
+/// remembered spot when the rose is hidden. `None` keeps it where it is (full screen).
+fn layer_panel_position(
+    placement: Placement,
+    dot: (i32, i32),
+    remembered: Option<(i32, i32)>,
+    outputs: &[Rect],
+    primary: Option<Rect>,
+) -> Option<(i32, i32)> {
+    let size = (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32);
+    match placement {
+        Placement::Keep => None,
+        Placement::BesideDot => {
+            let dot = Rect::new(dot.0, dot.1, DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
+            let monitor = geometry::monitor_for(dot, outputs)?;
+            Some(geometry::place_panel(dot, size, monitor, PANEL_GAP, EDGE_MARGIN))
+        }
+        Placement::Alone => {
+            let spot = remembered.and_then(|(x, y)| geometry::monitor_for(Rect::new(x, y, size.0, size.1), outputs));
+            Some(geometry::place_panel_alone(remembered, size, spot.or(primary)?, EDGE_MARGIN))
+        }
+    }
+}
+
+fn place_layer_panel(app: &AppHandle, layer: &LayerState, placement: Placement) -> CommandResult {
+    let dot = *layer.dot.lock().unwrap();
+    let remembered = *app.state::<Shell>().panel_spot.lock().unwrap();
+    let Some(position) = layer_panel_position(placement, dot, remembered, &layer_outputs(app)?, layer_primary(app)?) else {
+        return Ok(());
+    };
+    layer_place(app, PANEL, Rect::new(position.0, position.1, PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32))?;
+    *layer.panel.lock().unwrap() = Some(position);
+    Ok(())
+}
+
+/// The full-screen panel in layer mode: anchored to every edge of its output, or back to the
+/// corner it came from. Returns the new state.
+fn set_layer_fullscreen(app: &AppHandle, on: bool) -> CommandResult<bool> {
+    let shell = app.state::<Shell>();
+    let Some(layer) = &shell.layer else { return Ok(false) };
+    let panel = window(app, PANEL)?;
+    let mut full_screen = shell.full_screen.lock().unwrap();
+    let outputs = layer_outputs(app)?;
+    match (on, *full_screen) {
+        (true, None) => {
+            let Some((x, y)) = *layer.panel.lock().unwrap() else { return Ok(false) };
+            let before = Rect::new(x, y, PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32);
+            let Some((output, _)) = geometry::layer_margins(before, &outputs) else { return Ok(false) };
+            // GTK keeps a non-resizable window at its content size.
+            panel.set_resizable(true).map_err(err)?;
+            layer_fill(app, output)?;
+            *full_screen = Some(before);
+        }
+        (false, Some(before)) => {
+            let at = geometry::restore_rect(before, &outputs, EDGE_MARGIN);
+            layer_restore(app)?;
+            panel.set_size(LogicalSize::new(f64::from(at.width), f64::from(at.height))).map_err(err)?;
+            layer_place(app, PANEL, at)?;
+            *layer.panel.lock().unwrap() = Some((at.x, at.y));
+            *full_screen = None;
+        }
+        _ => {}
+    }
+    Ok(full_screen.is_some())
+}
+
+/// Runs a GTK call on the main thread, where it must run, and waits for its result.
+#[cfg(target_os = "linux")]
+fn on_main<T: Send + 'static>(app: &AppHandle, task: impl FnOnce() -> T + Send + 'static) -> CommandResult<T> {
+    if gtk::is_initialized_main_thread() {
+        return Ok(task());
+    }
+    let (done, result) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = done.send(task());
+    })
+    .map_err(err)?;
+    result.recv().map_err(err)
+}
+
+#[cfg(target_os = "linux")]
+fn layer_outputs(app: &AppHandle) -> CommandResult<Vec<Rect>> {
+    on_main(app, crate::layer::outputs)
+}
+
+#[cfg(target_os = "linux")]
+fn layer_primary(app: &AppHandle) -> CommandResult<Option<Rect>> {
+    on_main(app, crate::layer::primary_output)
+}
+
+/// Puts the top-left corner of a layer window at `rect`'s, on the output it is mostly on.
+#[cfg(target_os = "linux")]
+fn layer_place(app: &AppHandle, label: &str, rect: Rect) -> CommandResult {
+    let window = window(app, label)?;
+    on_main(app, move || crate::layer::place(&window.gtk_window().map_err(err)?, rect))?
+}
+
+#[cfg(target_os = "linux")]
+fn layer_fill(app: &AppHandle, output: usize) -> CommandResult {
+    let panel = window(app, PANEL)?;
+    on_main(app, move || crate::layer::fill_output(&panel.gtk_window().map_err(err)?, output))?
+}
+
+#[cfg(target_os = "linux")]
+fn layer_restore(app: &AppHandle) -> CommandResult {
+    let panel = window(app, PANEL)?;
+    on_main(app, move || panel.gtk_window().map(|gtk| crate::layer::restore_corner(&gtk)).map_err(err))?
+}
+
+// Layer mode exists only on Linux (`Shell::layer` is `None` elsewhere): these are never called.
+#[cfg(not(target_os = "linux"))]
+fn layer_outputs(_: &AppHandle) -> CommandResult<Vec<Rect>> {
+    Err("the layer shell is Linux only".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn layer_primary(_: &AppHandle) -> CommandResult<Option<Rect>> {
+    Err("the layer shell is Linux only".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn layer_place(_: &AppHandle, _: &str, _: Rect) -> CommandResult {
+    Err("the layer shell is Linux only".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn layer_fill(_: &AppHandle, _: usize) -> CommandResult {
+    Err("the layer shell is Linux only".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn layer_restore(_: &AppHandle) -> CommandResult {
+    Err("the layer shell is Linux only".into())
+}
+
+fn dot_rect_at((x, y): (i32, i32)) -> Rect {
+    Rect::new(x, y, DOT_SIZE.0 as i32, DOT_SIZE.1 as i32)
+}
+
+/// How the UI drags the Dot: `true` when it is a layer surface, which `startDragging` cannot move.
+/// The UI then sends its own movement to `drag_dot_by` and `end_dot_drag`.
+#[tauri::command]
+fn dot_drag_mode(app: AppHandle) -> bool {
+    app.state::<Shell>().layer.is_some()
+}
+
+/// Moves the layer Dot by the pointer's movement since the press (client coordinates, which are
+/// points). The press point stays under the pointer, so each offset is relative to where the
+/// Dot is now.
+#[tauri::command]
+fn drag_dot_by(app: AppHandle, dx: f64, dy: f64) -> CommandResult {
+    let shell = app.state::<Shell>();
+    let layer = shell.layer.as_ref().ok_or("the Dot is dragged by its window here")?;
+    if !dx.is_finite() || !dy.is_finite() {
+        return Err("the drag offset is not a number".into());
+    }
+    // One frame never moves it further than a screen.
+    let step = |value: f64| value.clamp(-DRAG_STEP_MAX, DRAG_STEP_MAX).round() as i32;
+    let (x, y) = *layer.dot.lock().unwrap();
+    let next = (x + step(dx), y + step(dy));
+    layer_place(&app, DOT, dot_rect_at(next))?;
+    *layer.dot.lock().unwrap() = next;
+    Ok(())
+}
+
+/// The pointer was released: snaps the layer Dot to the nearest edge of its output, saves the
+/// spot, and brings a visible panel along.
+#[tauri::command]
+fn end_dot_drag(app: AppHandle) -> CommandResult {
+    let shell = app.state::<Shell>();
+    let layer = shell.layer.as_ref().ok_or("the Dot is dragged by its window here")?;
+    let current = dot_rect_at(*layer.dot.lock().unwrap());
+    let (x, y) = geometry::snap_to_edge(current, &layer_outputs(&app)?, EDGE_MARGIN);
+    layer_place(&app, DOT, dot_rect_at((x, y)))?;
+    *layer.dot.lock().unwrap() = (x, y);
+    position::save(&desktop_file(&shell.config), DotPosition { x, y }).map_err(err)?;
+    if window(&app, PANEL)?.is_visible().unwrap_or(false) {
+        place_panel(&app)?;
+    }
+    Ok(())
 }
 
 fn show_panel(app: &AppHandle) -> CommandResult {
@@ -622,7 +830,13 @@ fn build_windows(
         crate::computer::win::record_call_window(Part::Panel, panel.hwnd()?.0);
     }
     #[cfg(not(windows))]
-    panel.build()?;
+    let panel = panel.build()?;
+    #[cfg(target_os = "linux")]
+    if app.state::<Shell>().layer.is_some() {
+        return build_layer_windows(app, config, &dot, &panel, rose_hidden);
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let _ = panel;
 
     if !places_windows {
         // Native Wayland ignores positions; Hyprland window rules place and pin the Dot.
@@ -645,6 +859,37 @@ fn build_windows(
     }
     // Set the size again once the window is in place, so it is exactly DOT_SIZE points there.
     dot.set_size(LogicalSize::new(DOT_SIZE.0, DOT_SIZE.1))?;
+    // A hidden rose stays placed, ready for "Show the rose".
+    if !rose_hidden {
+        dot.show()?;
+    }
+    Ok(())
+}
+
+/// Layer mode (S9): both windows become layer surfaces before their first show; the Dot starts at
+/// the saved position re-snapped, or at the default right edge of the primary output.
+#[cfg(target_os = "linux")]
+fn build_layer_windows(
+    app: &AppHandle,
+    config: &DesktopConfig,
+    dot: &WebviewWindow,
+    panel: &WebviewWindow,
+    rose_hidden: bool,
+) -> tauri::Result<()> {
+    let (dot_window, panel_window) = (dot.gtk_window()?, panel.gtk_window()?);
+    crate::layer::init_dot(&dot_window);
+    crate::layer::init_panel(&panel_window);
+    let outputs = crate::layer::outputs();
+    let saved = position::load(&desktop_file(config)).map(|p| (p.x, p.y));
+    let size = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
+    let start = geometry::initial_dot_position(saved, size, &outputs, crate::layer::primary_output(), EDGE_MARGIN)
+        .unwrap_or((EDGE_MARGIN, EDGE_MARGIN));
+    if let Some(layer) = &app.state::<Shell>().layer {
+        *layer.dot.lock().unwrap() = start;
+    }
+    if let Err(error) = crate::layer::place(&dot_window, dot_rect_at(start)) {
+        eprintln!("gentle-dot: cannot place the Dot: {error}");
+    }
     // A hidden rose stays placed, ready for "Show the rose".
     if !rose_hidden {
         dot.show()?;
@@ -880,6 +1125,9 @@ pub fn run() {
             rose_hidden,
             set_rose_hidden,
             set_panel_fullscreen,
+            dot_drag_mode,
+            drag_dot_by,
+            end_dot_drag,
             shortcut_get,
             shortcut_set,
             connector_command,
@@ -934,6 +1182,12 @@ pub fn run() {
                 }
             });
             let rose_hidden = position::load_rose_hidden(&desktop_file(&config));
+            // GTK is up here, so the compositor's layer shell can be asked for.
+            #[cfg(target_os = "linux")]
+            let layer = platform::uses_layer_shell(Os::CURRENT, |key| std::env::var(key).ok(), crate::layer::supported())
+                .then(LayerState::default);
+            #[cfg(not(target_os = "linux"))]
+            let layer = None;
             app.manage(Shell {
                 config: config.clone(),
                 daemon,
@@ -943,6 +1197,7 @@ pub fn run() {
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
                 shortcut: Mutex::new(None),
+                layer,
             });
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
@@ -966,6 +1221,10 @@ pub fn run() {
                         let _ = snap.send(());
                     }
                 });
+            } else if app.state::<Shell>().layer.is_some() {
+                eprintln!(
+                    "gentle-dot: native Wayland with the layer shell: the app places the windows and the desktop owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
+                );
             } else {
                 eprintln!(
                     "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
@@ -1035,6 +1294,50 @@ mod tests {
         assert_eq!(panel_placement(true, true, true), Placement::Keep);
         assert_eq!(panel_placement(true, true, false), Placement::Keep);
         assert_eq!(panel_placement(false, false, true), Placement::Keep);
+    }
+
+    #[test]
+    fn the_layer_panel_goes_beside_the_dot_or_alone_on_its_output() {
+        let left = Rect::new(0, 0, 1920, 1080);
+        let right = Rect::new(1920, 0, 2560, 1440);
+        let outputs = [left, right];
+        let dot_on_right_edge = (1852, 504);
+        // (placement, dot, remembered spot, primary output, expected)
+        let cases = [
+            (Placement::Keep, dot_on_right_edge, None, Some(left), None),
+            // Beside the Dot on the side with room, centered on it vertically.
+            (Placement::BesideDot, dot_on_right_edge, None, Some(left), Some((1424, 220))),
+            (Placement::BesideDot, (12, 300), None, Some(left), Some((92, 16))),
+            // On the second output the position stays global.
+            (Placement::BesideDot, (4300, 600), None, Some(left), Some((3872, 316))),
+            // Without the Dot: the remembered spot (pulled inside), else the default on the primary output.
+            (Placement::Alone, dot_on_right_edge, Some((100, 100)), Some(left), Some((100, 100))),
+            (Placement::Alone, dot_on_right_edge, Some((3000, 200)), Some(left), Some((3000, 200))),
+            (Placement::Alone, dot_on_right_edge, None, Some(left), Some((1488, 220))),
+            (Placement::Alone, dot_on_right_edge, None, None, None),
+        ];
+        for (placement, dot, remembered, primary, expected) in cases {
+            assert_eq!(layer_panel_position(placement, dot, remembered, &outputs, primary), expected, "{placement:?} {dot:?}");
+        }
+    }
+
+    #[test]
+    fn the_drag_commands_are_registered_and_granted_to_the_dot_only() {
+        let build = include_str!("../build.rs");
+        let capabilities: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        for command in ["dot_drag_mode", "drag_dot_by", "end_dot_drag"] {
+            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == permission.as_str()))
+                .flat_map(|c| c["windows"].as_array().unwrap())
+                .collect();
+            assert_eq!(windows, ["dot"], "{permission}");
+        }
     }
 
     #[test]

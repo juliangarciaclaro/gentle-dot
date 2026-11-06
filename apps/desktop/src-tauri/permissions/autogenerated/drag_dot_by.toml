@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-drag-dot-by"
+description = "Enables the drag_dot_by command without any pre-configured scope."
+commands.allow = ["drag_dot_by"]
+
+[[permission]]
+identifier = "deny-drag-dot-by"
+description = "Denies the drag_dot_by command without any pre-configured scope."
+commands.deny = ["drag_dot_by"]

@@ -8,6 +8,8 @@ pub mod daemon;
 pub mod disclaimed;
 pub mod geometry;
 pub mod health;
+#[cfg(target_os = "linux")]
+mod layer;
 pub mod platform;
 pub mod position;
 pub mod secure_store;

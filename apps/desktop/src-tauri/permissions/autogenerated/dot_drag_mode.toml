@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dot-drag-mode"
+description = "Enables the dot_drag_mode command without any pre-configured scope."
+commands.allow = ["dot_drag_mode"]
+
+[[permission]]
+identifier = "deny-dot-drag-mode"
+description = "Denies the dot_drag_mode command without any pre-configured scope."
+commands.deny = ["dot_drag_mode"]
