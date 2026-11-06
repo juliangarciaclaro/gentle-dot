@@ -277,7 +277,7 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
             Ok(window) => {
                 let guard = GlowGuard { app: app.clone(), control: control.clone(), hid: AtomicBool::new(false) };
                 linux.set_capture_guard(Arc::new(guard));
-                run_linux_glow(app.clone(), window, linux.clone(), control.clone(), working.clone(), marks);
+                run_linux_glow(app.clone(), window, glow_uses_layer_shell(), linux.clone(), control.clone(), working.clone(), marks);
             }
             Err(error) => eprintln!("gentle-dot: the computer-control glow is unavailable: {error}"),
         }
@@ -551,12 +551,31 @@ fn build_linux_glow(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
         .decorations(false).always_on_top(true).resizable(false).skip_taskbar(true)
         .visible_on_all_workspaces(true).shadow(false).focused(false).focusable(false).visible(false)
         .build().map_err(|error| error.to_string())?;
+    use gtk::prelude::WidgetExt;
+    let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
+    // Where the Dot is a layer surface, so is the glow (T15h): a toplevel sat in the dock and took
+    // the focus from the app being controlled. Initialized before it is realized.
+    if glow_uses_layer_shell() {
+        crate::layer::init_glow(&gtk_window);
+    }
     // tao unwraps the GdkWindow to set the input shape, and a window never shown has none yet:
     // realizing it creates one without mapping it. Main thread only (setup).
-    use gtk::prelude::WidgetExt;
-    window.gtk_window().map_err(|error| error.to_string())?.realize();
+    gtk_window.realize();
     window.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
+    // GDK3 on Wayland gives every show a new surface without the empty input region set before,
+    // so after its first show the glow took every click, the user's and the assistant's (T15h).
+    gtk_window.connect_map(|gtk_window| {
+        if let Some(gdk_window) = gtk_window.window() {
+            gdk_window.input_shape_combine_region(&gtk::cairo::Region::create(), 0, 0);
+        }
+    });
     Ok(window)
+}
+
+/// The same decision as the Dot's, the panel's and the dialogs' (T14, T15e).
+#[cfg(target_os = "linux")]
+fn glow_uses_layer_shell() -> bool {
+    crate::platform::uses_layer_shell(crate::platform::Os::CURRENT, |key| std::env::var(key).ok(), crate::layer::supported())
 }
 
 /// The overlay comes back after a capture only if it was showing and the session is still on.
@@ -606,19 +625,45 @@ impl super::CaptureGuard for GlowGuard {
 /// Moves the overlay over `display` (layout pixels, which are the XWayland root's) unless it
 /// already covers it.
 #[cfg(target_os = "linux")]
-fn cover_linux(window: &tauri::WebviewWindow, covering: &mut Option<super::glow::Frame>, display: super::glow::Frame) {
+fn cover_linux(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+    layer: bool,
+    covering: &mut Option<super::glow::Frame>,
+    display: super::glow::Frame,
+) {
     use tauri::{PhysicalPosition, PhysicalSize};
-    if *covering != Some(display) {
+    if *covering == Some(display) {
+        return;
+    }
+    if layer {
+        // A layer surface has no position: its output is picked, and its anchors fill it.
+        let rect = crate::geometry::Rect {
+            x: display.x as i32,
+            y: display.y as i32,
+            width: display.width as i32,
+            height: display.height as i32,
+        };
+        let window = window.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Ok(gtk_window) = window.gtk_window() {
+                if let Err(error) = crate::layer::cover(&gtk_window, rect) {
+                    eprintln!("gentle-dot: cannot move the glow: {error}");
+                }
+            }
+        });
+    } else {
         let _ = window.set_position(PhysicalPosition::new(display.x as i32, display.y as i32));
         let _ = window.set_size(PhysicalSize::new(display.width as u32, display.height as u32));
-        *covering = Some(display);
     }
+    *covering = Some(display);
 }
 
 #[cfg(target_os = "linux")]
 fn run_linux_glow(
     app: AppHandle,
     window: tauri::WebviewWindow,
+    layer: bool,
     desktop: Arc<super::LinuxDesktop>,
     control: Arc<Control>,
     working: Arc<Working>,
@@ -642,7 +687,7 @@ fn run_linux_glow(
                         match desktop.capture_frame() {
                             None => Err("no display under the pointer".to_string()),
                             Some(display) => {
-                                cover_linux(&window, &mut covering, display);
+                                cover_linux(&app, &window, layer, &mut covering, display);
                                 set_shown(true);
                                 shown = true;
                                 drawing = Some(operation);
@@ -659,7 +704,7 @@ fn run_linux_glow(
                     if !control.is_active(SystemClock.now_ms()) { continue; }
                     let placed = super::glow::place(mark, |at| desktop.display_frame_at(at), || desktop.focused_frame());
                     let Some((display, event)) = placed else { continue };
-                    cover_linux(&window, &mut covering, display);
+                    cover_linux(&app, &window, layer, &mut covering, display);
                     if !shown { set_shown(true); shown = true; }
                     let event = super::glow::in_css_pixels(event, window.scale_factor().unwrap_or(1.0));
                     if let Err(error) = app.emit_to(GLOW_WINDOW, GLOW_EVENT, event) {

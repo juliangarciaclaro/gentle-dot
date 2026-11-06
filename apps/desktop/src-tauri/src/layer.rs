@@ -85,6 +85,27 @@ pub fn init_panel(window: &gtk::ApplicationWindow, size: (i32, i32)) {
     init(window, size, Layer::Top, KeyboardMode::OnDemand);
 }
 
+/// The computer-control glow (T15h): above everything, filling its output, and it never takes
+/// the keyboard, so the app being controlled keeps its focus and its open menus. The pointer goes
+/// through it by its input region, which the caller sets.
+pub fn init_glow(window: &gtk::ApplicationWindow) {
+    init(window, (1, 1), Layer::Overlay, KeyboardMode::None);
+    for edge in [Edge::Top, Edge::Left, Edge::Bottom, Edge::Right] {
+        window.set_anchor(edge, true);
+    }
+}
+
+/// Moves the glow onto the output the global `rect` is mostly on; its anchors make it fill it.
+pub fn cover(window: &gtk::ApplicationWindow, rect: Rect) -> Result<(), String> {
+    let monitors = monitors();
+    let rects: Vec<Rect> = monitors.iter().map(rect_of).collect();
+    let (index, _) = geometry::layer_margins(rect, &rects).ok_or("no output to cover")?;
+    if window.monitor().as_ref() != Some(&monitors[index]) {
+        window.set_monitor(&monitors[index]);
+    }
+    Ok(())
+}
+
 /// Puts the window's top-left corner at the global `rect` corner: on the output it is mostly on,
 /// by margins from that output's origin. Moving to another output remaps the surface.
 pub fn place(window: &gtk::ApplicationWindow, rect: Rect) -> Result<(), String> {
