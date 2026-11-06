@@ -551,8 +551,13 @@ fn build_linux_glow(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
         .decorations(false).always_on_top(true).resizable(false).skip_taskbar(true)
         .visible_on_all_workspaces(true).shadow(false).focused(false).focusable(false).visible(false)
         .build().map_err(|error| error.to_string())?;
-    use gtk::prelude::WidgetExt;
+    use gtk::prelude::{GtkWindowExt, WidgetExt};
     let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
+    // tao gives an undecorated Wayland window an empty titlebar, which turns on GTK's client-side
+    // decorations; GTK then sets the input region to the whole window and its shadow at every
+    // size change, over the empty one below, and the glow took every click, the user's and the
+    // assistant's (T15h, L55). Without the titlebar GTK leaves the input region alone.
+    gtk_window.set_titlebar(None::<&gtk::Widget>);
     // Where the Dot is a layer surface, so is the glow (T15h): a toplevel sat in the dock and took
     // the focus from the app being controlled. Initialized before it is realized.
     if glow_uses_layer_shell() {
@@ -562,8 +567,8 @@ fn build_linux_glow(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     // realizing it creates one without mapping it. Main thread only (setup).
     gtk_window.realize();
     window.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
-    // GDK3 on Wayland gives every show a new surface without the empty input region set before,
-    // so after its first show the glow took every click, the user's and the assistant's (T15h).
+    // GDK3 on Wayland makes a new surface when a hidden window shows again; the empty region is
+    // set again on every map so each one gets it.
     gtk_window.connect_map(|gtk_window| {
         if let Some(gdk_window) = gtk_window.window() {
             gdk_window.input_shape_combine_region(&gtk::cairo::Region::create(), 0, 0);
