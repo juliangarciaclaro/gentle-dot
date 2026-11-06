@@ -48,8 +48,8 @@ const PANEL_SIZE: (f64, f64) = (420.0, 640.0);
 /// All placement runs in points (see `geometry`), so margins never depend on a scale factor.
 const EDGE_MARGIN: i32 = 12;
 const PANEL_GAP: i32 = 8;
-/// The most a layer Dot moves for one drag message, in points.
-const DRAG_STEP_MAX: f64 = 4000.0;
+/// The largest drag offset a layer Dot takes, in points: wider than any monitor layout.
+const DRAG_OFFSET_MAX: f64 = 100_000.0;
 const DRAG_SETTLE: Duration = Duration::from_millis(300);
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 /// Sent to the Dot and the panel each time the assistant this app may use starts answering (at
@@ -80,6 +80,8 @@ struct Shell {
 #[derive(Default)]
 struct LayerState {
     dot: Mutex<(i32, i32)>,
+    /// Where the Dot was when the current drag began; `None` between drags.
+    drag_start: Mutex<Option<(i32, i32)>>,
     /// Where the panel was last placed; `None` until its first show.
     panel: Mutex<Option<(i32, i32)>>,
 }
@@ -679,20 +681,27 @@ fn dot_drag_mode(app: AppHandle) -> bool {
     app.state::<Shell>().layer.is_some()
 }
 
-/// Moves the layer Dot by the pointer's movement since the press (client coordinates, which are
-/// points). The press point stays under the pointer, so each offset is relative to where the
-/// Dot is now.
+/// Where a layer Dot dragged from `start` goes for the pointer's movement since the press, or
+/// `None` for an offset that is not a number. COSMIC reports the pointer relative to where the
+/// surface was when the button went down for the whole drag (L34), so the offset counts from the
+/// drag's start, never from where the Dot is now.
+fn dragged_dot(start: (i32, i32), dx: f64, dy: f64) -> Option<(i32, i32)> {
+    if !dx.is_finite() || !dy.is_finite() {
+        return None;
+    }
+    // `as` saturates, and the sum saturates too: a wild offset stops at the edge of the range.
+    let offset = |value: f64| value.clamp(-DRAG_OFFSET_MAX, DRAG_OFFSET_MAX).round() as i32;
+    Some((start.0.saturating_add(offset(dx)), start.1.saturating_add(offset(dy))))
+}
+
+/// Moves the layer Dot to where the drag started plus the pointer's movement since the press
+/// (client coordinates, which are points). The first call of a drag records the start.
 #[tauri::command]
 fn drag_dot_by(app: AppHandle, dx: f64, dy: f64) -> CommandResult {
     let shell = app.state::<Shell>();
     let layer = shell.layer.as_ref().ok_or("the Dot is dragged by its window here")?;
-    if !dx.is_finite() || !dy.is_finite() {
-        return Err("the drag offset is not a number".into());
-    }
-    // One frame never moves it further than a screen.
-    let step = |value: f64| value.clamp(-DRAG_STEP_MAX, DRAG_STEP_MAX).round() as i32;
-    let (x, y) = *layer.dot.lock().unwrap();
-    let next = (x.saturating_add(step(dx)), y.saturating_add(step(dy)));
+    let start = *layer.drag_start.lock().unwrap().get_or_insert(*layer.dot.lock().unwrap());
+    let next = dragged_dot(start, dx, dy).ok_or("the drag offset is not a number")?;
     layer_place(&app, DOT, dot_rect_at(next))?;
     *layer.dot.lock().unwrap() = next;
     Ok(())
@@ -704,6 +713,7 @@ fn drag_dot_by(app: AppHandle, dx: f64, dy: f64) -> CommandResult {
 fn end_dot_drag(app: AppHandle) -> CommandResult {
     let shell = app.state::<Shell>();
     let layer = shell.layer.as_ref().ok_or("the Dot is dragged by its window here")?;
+    *layer.drag_start.lock().unwrap() = None;
     let current = dot_rect_at(*layer.dot.lock().unwrap());
     let (x, y) = geometry::snap_to_edge(current, &layer_outputs(&app)?, EDGE_MARGIN);
     layer_place(&app, DOT, dot_rect_at((x, y)))?;
@@ -1318,6 +1328,24 @@ mod tests {
         ];
         for (placement, dot, remembered, primary, expected) in cases {
             assert_eq!(layer_panel_position(placement, dot, remembered, &outputs, primary), expected, "{placement:?} {dot:?}");
+        }
+    }
+
+    #[test]
+    fn a_layer_drag_counts_the_offset_from_where_the_dot_started() {
+        // (start, dx, dy, expected)
+        let cases = [
+            ((1836, 166), 0.0, 0.0, Some((1836, 166))),
+            ((1836, 166), -936.4, 374.6, Some((900, 541))),
+            // The same offset twice lands on the same spot: nothing accumulates.
+            ((1836, 166), -936.4, 374.6, Some((900, 541))),
+            // A huge offset is bounded, never wraps.
+            ((i32::MAX - 10, 0), 1e12, 0.0, Some((i32::MAX, 0))),
+            ((0, 0), f64::NAN, 0.0, None),
+            ((0, 0), 0.0, f64::INFINITY, None),
+        ];
+        for (start, dx, dy, expected) in cases {
+            assert_eq!(dragged_dot(start, dx, dy), expected, "{start:?} {dx} {dy}");
         }
     }
 
