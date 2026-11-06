@@ -228,12 +228,14 @@ describe("changing the shortcut (S33.2, S33.3)", () => {
 	it("Esc cancels recording without hiding the panel", async () => {
 		await startRecording();
 		fireEvent.keyDown(window, { key: "Escape", code: "Escape" });
+		fireEvent.keyUp(window, { key: "Escape", code: "Escape" });
 		await waitFor(() => expect(screen.queryByText(/Press the new shortcut/)).toBeNull());
 		expect(invoked("hide_panel")).toHaveLength(0);
 		expect(invoked("shortcut_set")).toHaveLength(0);
 		expect(screen.getByText("⌥ Space")).toBeInTheDocument();
 		// Not recording any more: the next Esc hides the panel as usual.
 		fireEvent.keyDown(window, { key: "Escape", code: "Escape" });
+		fireEvent.keyUp(window, { key: "Escape", code: "Escape" });
 		expect(invoked("hide_panel")).toHaveLength(1);
 	});
 

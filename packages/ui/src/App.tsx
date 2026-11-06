@@ -154,22 +154,34 @@ function Assistant({ surface }: { surface: Surface }) {
 			onDesktopEvent("dot://panel-shown", () => setFocusKey((k) => k + 1)),
 		];
 		// Esc, in order: whatever inside the panel already handled it (it called preventDefault),
-		// then leaving full screen, then hiding the panel.
+		// then leaving full screen, then hiding the panel. It acts on the release of a press the panel
+		// saw: hidden on the press, the release would reach no window and WebKitGTK would take the
+		// next Esc for a key still held, so it would need two presses (L45).
+		let escPressed = false;
 		const onKey = (event: KeyboardEvent) => {
+			if (event.key === "Escape") escPressed = !event.defaultPrevented;
 			if (event.defaultPrevented) return;
-			if (event.key === "Escape") {
-				if (fullscreenNow.current) setFullscreen(false);
-				else hidePanel();
-				return;
-			}
 			if (isFullscreenShortcut(event)) {
 				event.preventDefault();
 				setFullscreen(!fullscreenNow.current);
 			}
 		};
+		const onKeyUp = (event: KeyboardEvent) => {
+			if (event.key !== "Escape" || !escPressed) return;
+			escPressed = false;
+			if (fullscreenNow.current) setFullscreen(false);
+			else hidePanel();
+		};
+		const onBlur = () => {
+			escPressed = false;
+		};
 		window.addEventListener("keydown", onKey);
+		window.addEventListener("keyup", onKeyUp);
+		window.addEventListener("blur", onBlur);
 		return () => {
 			window.removeEventListener("keydown", onKey);
+			window.removeEventListener("keyup", onKeyUp);
+			window.removeEventListener("blur", onBlur);
 			for (const s of subscriptions) void s.then((unlisten) => unlisten());
 		};
 	}, [surface, send, fullscreenNow, setFullscreen]);

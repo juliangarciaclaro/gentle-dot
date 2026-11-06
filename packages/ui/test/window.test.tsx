@@ -147,13 +147,21 @@ describe("full-screen chat (S26.2)", () => {
 		await waitFor(() => expect(chat(container)).toHaveClass("chat-fullscreen"));
 
 		fireEvent.keyDown(window, { key: "Escape" });
+		fireEvent.keyUp(window, { key: "Escape" });
 		await waitFor(() => expect(chat(container)).not.toHaveClass("chat-fullscreen"));
 		expect(lastArgs("set_panel_fullscreen")).toEqual({ on: false });
 		expect(invoked("hide_panel")).toHaveLength(0);
 
+		// The panel hides on the release: hidden on the press, the release would reach no window,
+		// and WebKitGTK would swallow the next Esc as a key still held (L45).
 		fireEvent.keyDown(window, { key: "Escape" });
+		expect(invoked("hide_panel")).toHaveLength(0);
+		fireEvent.keyUp(window, { key: "Escape" });
 		expect(invoked("hide_panel")).toHaveLength(1);
 		expect(invoked("set_panel_fullscreen")).toHaveLength(2);
+		// A release without its press (the press went to another window) does nothing.
+		fireEvent.keyUp(window, { key: "Escape" });
+		expect(invoked("hide_panel")).toHaveLength(1);
 	});
 
 	it("leaves an Esc that something inside the panel already handled alone", async () => {
@@ -164,6 +172,7 @@ describe("full-screen chat (S26.2)", () => {
 		box.addEventListener("keydown", (event) => event.preventDefault());
 
 		fireEvent.keyDown(box, { key: "Escape" });
+		fireEvent.keyUp(box, { key: "Escape" });
 		expect(chat(container)).toHaveClass("chat-fullscreen");
 		expect(invoked("set_panel_fullscreen")).toHaveLength(1);
 		expect(invoked("hide_panel")).toHaveLength(0);

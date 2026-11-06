@@ -129,7 +129,7 @@ Drag the rose to the middle of the screen and let go.
 
 Click the rose (without dragging).
 
-**Expected:** a 420 × 640 dark panel opens next to the rose, and the cursor is in the message box. The panel background is solid dark, not see-through. Press `Esc`: the panel hides. Click the rose again: it opens again. **COSMIC:** the panel opens on the side of the rose with more room, centered on it. Drag the rose while the panel is open: the panel follows when you let go. Hide the panel, drag the rose far away, and open it again: it opens next to the rose, not where it was.
+**Expected:** a 420 × 640 dark panel opens next to the rose, and the cursor is in the message box. The panel background is solid dark, not see-through. Press `Esc` once: the panel hides. Click the rose and press `Esc` a few more times: one press always hides it. Click the rose again: it opens again. **COSMIC:** the panel opens on the side of the rose with more room, centred on the rose and kept inside the screen (near the top or bottom edge it lines up with that edge instead). Drag the rose while the panel is open: the panel follows when you let go. Hide the panel, drag the rose far away, and open it again: it opens next to the rose, not where it was.
 
 ### 8. Tray icon and menu
 
@@ -141,8 +141,8 @@ gnome-extensions enable ubuntu-appindicators@ubuntu.com
 
 **Expected:**
 - A small rose appears in the top bar (GNOME) or in Waybar (Omarchy). It is light gray with a dark outline, and readable on both light and dark bars.
-- Clicking it opens a menu: Open, Open in browser, Restart assistant, Launch at login, Quit.
-- **Open** shows the panel. **Open in browser** opens the same chat in your browser.
+- Clicking it opens a menu: Open, Open in browser, Hide the rose, Restart assistant, Launch at login, Quit.
+- **Open** shows the panel. **Open in browser** opens the same chat in your browser. **Hide the rose** hides the rose, and the item then reads **Show the rose**.
 - Hovering over the icon may show "Gentle Dot — Ready". Many Linux panels do not show tray tooltips, so this is not a failure.
 - While the assistant answers (step 11), the icon's outer petals turn dashed. When it waits for your answer, an amber dot appears on the icon.
 
