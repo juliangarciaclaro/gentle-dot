@@ -35,9 +35,18 @@ pub struct WindowInfo {
     pub app_id: String,
     pub title: String,
     pub activated: bool,
+    /// Not on screen: minimized, or on a workspace that is not showing (`on_active_workspace`).
     pub minimized: bool,
     /// The window's geometry on each output it is visible on, relative to that output.
     pub frames: Vec<(u32, Rect)>,
+}
+
+/// Whether a window with these workspaces is on one the user is looking at (`active`). Without
+/// workspace information (the compositor offers none, or none is active yet) or for a window that
+/// reports no workspace, it counts as visible: that is the answer without this rule, and the
+/// other guards still apply.
+pub fn on_active_workspace<T: PartialEq>(workspaces: &[T], active: &[T]) -> bool {
+    active.is_empty() || workspaces.is_empty() || workspaces.iter().any(|workspace| active.contains(workspace))
 }
 
 pub(super) fn contains(rect: &Rect, at: Point) -> bool {
@@ -318,6 +327,45 @@ mod tests {
         let other = window(3, "nautilus", &[(1, rect(0, 0, 1000, 1000))]);
         assert_eq!(owner_at(&[minimized(one), other], &outputs(), at(5.0, 5.0)).map(|w| w.id), Some(3));
         assert_eq!(owner_at(&[minimized(two)], &outputs(), at(5.0, 5.0)), None);
+    }
+
+    #[test]
+    fn a_window_counts_as_visible_unless_every_workspace_it_is_on_is_hidden() {
+        // (workspaces the window is on, active workspaces, visible)
+        let cases: [(&[u32], &[u32], bool); 7] = [
+            (&[1], &[2], false),
+            (&[2], &[2], true),
+            (&[1, 2], &[2], true),
+            (&[1, 3], &[2], false),
+            // No workspace information, or none about the window: as before.
+            (&[1], &[], true),
+            (&[], &[2], true),
+            (&[], &[], true),
+        ];
+        for (workspaces, active, visible) in cases {
+            assert_eq!(on_active_workspace(workspaces, active), visible, "{workspaces:?} vs {active:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_on_another_workspace_neither_owns_a_point_nor_blocks_the_one_that_does() {
+        // The editor (workspace 2, in front) is tiled over the same point as two apps on
+        // workspaces 1 and 3 whose geometry still covers it.
+        let active_workspaces = [2u32];
+        let on = |workspace: u32, mut w: WindowInfo| {
+            w.minimized = !on_active_workspace(&[workspace], &active_workspaces);
+            w
+        };
+        let frame = [(1, rect(0, 0, 1000, 1000))];
+        let windows = [
+            on(1, window(1, "chrome", &frame)),
+            on(2, active(window(2, "editor", &frame))),
+            on(3, window(3, "opera", &frame)),
+        ];
+        assert_eq!(owner_at(&windows, &outputs(), at(5.0, 5.0)).map(|w| w.id), Some(2));
+        let without_active = [on(1, window(1, "chrome", &frame)), on(2, window(2, "editor", &frame)), on(3, window(3, "opera", &frame))];
+        assert_eq!(owner_at(&without_active, &outputs(), at(5.0, 5.0)).map(|w| w.id), Some(2));
+        assert_eq!(frontmost(&[on(1, active(window(1, "chrome", &frame)))]), None);
     }
 
     #[test]

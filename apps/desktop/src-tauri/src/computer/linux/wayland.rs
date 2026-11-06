@@ -1,11 +1,12 @@
 //! Our own Wayland client for COSMIC (S2), on a thread of its own: the outputs with their
 //! logical geometry (`zxdg_output_v1`), the windows (`ext_foreign_toplevel_list_v1` extended by
 //! `zcosmic_toplevel_info_v1`), activating a window (`zcosmic_toplevel_manager_v1`), and the
-//! virtual keyboard (`zwp_virtual_keyboard_v1`). The thread keeps `Shared` current as events
+//! virtual keyboard (`zwp_virtual_keyboard_v1`), and which workspaces are showing
+//! (`ext_workspace_manager_v1`). The thread keeps `Shared` current as events
 //! arrive; callers ask it to act through a channel and never wait longer than `TIMEOUT`.
 
 use super::pointer::Rect;
-use super::toplevels::{OutputInfo, Settle, WindowInfo};
+use super::toplevels::{on_active_workspace, OutputInfo, Settle, WindowInfo};
 use super::typing::KeyStep;
 use cosmic_protocols::toplevel_info::v1::client::{zcosmic_toplevel_handle_v1, zcosmic_toplevel_info_v1};
 use cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_v1;
@@ -16,8 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wayland_client::backend::{ObjectId, WaylandError};
 use wayland_client::protocol::{wl_callback, wl_output, wl_registry, wl_seat};
-use wayland_client::{delegate_noop, event_created_child, Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_client::{delegate_noop, event_created_child, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1};
+use wayland_protocols::ext::workspace::v1::client::{ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1};
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1};
 
@@ -27,6 +29,8 @@ pub const TIMEOUT: Duration = Duration::from_secs(2);
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
 const STATE_MINIMIZED: u32 = 1;
 const STATE_ACTIVATED: u32 = 2;
+/// `ext_workspace_handle_v1.state.active`.
+const WORKSPACE_ACTIVE: u32 = 1;
 
 /// What the thread has learned so far.
 #[derive(Default)]
@@ -61,6 +65,11 @@ struct OutputEntry {
     size: Option<(i32, i32)>,
 }
 
+struct WorkspaceEntry {
+    wl: ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+    active: bool,
+}
+
 struct TopEntry {
     id: u32,
     ext: ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
@@ -69,6 +78,8 @@ struct TopEntry {
     title: String,
     activated: bool,
     minimized: bool,
+    /// The workspaces the window is on.
+    workspaces: Vec<ObjectId>,
     /// Geometry per `wl_output`, relative to it.
     frames: Vec<(ObjectId, Rect)>,
 }
@@ -86,6 +97,10 @@ struct State {
     info: Option<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1>,
     manager: Option<zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1>,
     toplevels: Vec<TopEntry>,
+    workspace_manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
+    workspaces: Vec<WorkspaceEntry>,
+    /// The workspace manager has sent its first `done`, so `workspaces` is whole.
+    workspaces_known: bool,
     next_window: u32,
     settle: Settle,
 }
@@ -105,6 +120,9 @@ impl State {
             info: None,
             manager: None,
             toplevels: Vec::new(),
+            workspace_manager: None,
+            workspaces: Vec::new(),
+            workspaces_known: false,
             next_window: 1,
             settle: Settle::default(),
         }
@@ -170,6 +188,12 @@ impl State {
                 })
             })
             .collect();
+        // Empty when the compositor offers no workspaces: every window then counts as visible.
+        let active: Vec<ObjectId> = if self.workspaces_known {
+            self.workspaces.iter().filter(|w| w.active).map(|w| w.wl.id()).collect()
+        } else {
+            Vec::new()
+        };
         let windows = self
             .toplevels
             .iter()
@@ -178,7 +202,7 @@ impl State {
                 app_id: t.app_id.clone(),
                 title: t.title.clone(),
                 activated: t.activated,
-                minimized: t.minimized,
+                minimized: t.minimized || !on_active_workspace(&t.workspaces, &active),
                 frames: t
                     .frames
                     .iter()
@@ -298,6 +322,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                             registry.bind::<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1, _, _>(name, version.min(3), qh, ()),
                         );
                     }
+                    "ext_workspace_manager_v1" => {
+                        state.workspace_manager = Some(
+                            registry.bind::<ext_workspace_manager_v1::ExtWorkspaceManagerV1, _, _>(name, 1, qh, ()),
+                        );
+                    }
                     "zcosmic_toplevel_manager_v1" => {
                         state.manager = Some(
                             registry.bind::<zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1, _, _>(name, version.min(4), qh, ()),
@@ -370,6 +399,7 @@ impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for St
                 title: String::new(),
                 activated: false,
                 minimized: false,
+                workspaces: Vec::new(),
                 frames: Vec::new(),
             });
             state.settle.opened(Instant::now());
@@ -459,10 +489,88 @@ impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()> for State
                     }
                 }
             }
+            Event::ExtWorkspaceEnter { workspace } => {
+                let wl = workspace.id();
+                if let Some(top) = state.top_of_cosmic(handle) {
+                    if !top.workspaces.contains(&wl) {
+                        top.workspaces.push(wl);
+                    }
+                }
+            }
+            Event::ExtWorkspaceLeave { workspace } => {
+                let wl = workspace.id();
+                if let Some(top) = state.top_of_cosmic(handle) {
+                    top.workspaces.retain(|known| *known != wl);
+                }
+            }
             Event::OutputLeave { output } => {
                 let wl = output.id();
                 if let Some(top) = state.top_of_cosmic(handle) {
                     top.frames.retain(|(known, _)| *known != wl);
+                }
+            }
+            _ => return,
+        }
+        state.settle.opened(Instant::now());
+    }
+}
+
+impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_workspace_manager_v1::Event::Workspace { workspace } => {
+                state.workspaces.push(WorkspaceEntry { wl: workspace, active: false });
+                state.settle.opened(Instant::now());
+            }
+            ext_workspace_manager_v1::Event::Done => {
+                state.workspaces_known = true;
+                state.settle.closed();
+                state.settle.changed();
+            }
+            ext_workspace_manager_v1::Event::Finished => {
+                state.workspaces_known = false;
+                state.settle.changed();
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(State, ext_workspace_manager_v1::ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        handle: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+        event: ext_workspace_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_workspace_handle_v1::Event::State { state: flags } => {
+                let bits = match flags {
+                    WEnum::Value(known) => known.bits(),
+                    WEnum::Unknown(raw) => raw,
+                };
+                if let Some(entry) = state.workspaces.iter_mut().find(|w| w.wl.id() == handle.id()) {
+                    entry.active = bits & WORKSPACE_ACTIVE != 0;
+                }
+            }
+            ext_workspace_handle_v1::Event::Removed => {
+                state.workspaces.retain(|w| w.wl.id() != handle.id());
+                for top in &mut state.toplevels {
+                    top.workspaces.retain(|known| *known != handle.id());
                 }
             }
             _ => return,
@@ -486,6 +594,7 @@ delegate_noop!(State: ignore wl_seat::WlSeat);
 delegate_noop!(State: zxdg_output_manager_v1::ZxdgOutputManagerV1);
 delegate_noop!(State: zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1);
 delegate_noop!(State: zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1);
+delegate_noop!(State: ignore ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1);
 delegate_noop!(State: ignore zcosmic_toplevel_manager_v1::ZcosmicToplevelManagerV1);
 
 /// The client: a handle on the Wayland thread.
