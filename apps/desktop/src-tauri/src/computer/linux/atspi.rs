@@ -9,12 +9,8 @@
 //! with the `is-default` state.
 
 use crate::computer::risk::{AxElement, Focus};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
-#[cfg(target_os = "linux")]
-use std::sync::atomic::AtomicBool;
-#[cfg(target_os = "linux")]
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// AT-SPI state numbers (`AtspiStateType`).
@@ -43,6 +39,24 @@ pub struct Raw {
     pub value: Option<String>,
 }
 
+/// What a query found. `Unknown` is not `Nothing`: the query could not finish (no worker free,
+/// out of time) or saw only part of the tree, so the risk checks ask instead of allowing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome<T> {
+    Found(T),
+    /// The tree was read to the end and has no such element.
+    Nothing,
+    Unknown,
+}
+
+/// The top-level accessibles read, and whether the list is complete: an application that did not
+/// answer, or the budget running out, cuts it short.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing<N> {
+    pub windows: Vec<(N, Window)>,
+    pub complete: bool,
+}
+
 /// A top-level accessible of an application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
@@ -60,7 +74,7 @@ pub trait Tree {
     fn child_at(&self, node: &Self::Node, point: (i32, i32)) -> Option<Self::Node>;
     fn children(&self, node: &Self::Node) -> Vec<Self::Node>;
     /// The top-level accessibles of every application.
-    fn windows(&self) -> Vec<(Self::Node, Window)>;
+    fn windows(&self) -> Listing<Self::Node>;
     /// The time for this query is up.
     fn expired(&self) -> bool {
         false
@@ -118,21 +132,86 @@ pub fn focus(focused: &Raw, default: Option<&Raw>) -> Focus {
 }
 
 /// The window an element is looked up in: the only one with the owner's title, else (when the
-/// owner is the active window) the only active one. Several candidates are not known.
-pub fn pick_window(windows: &[Window], title: &str, owner_active: bool) -> Option<usize> {
+/// owner is the active window) the only active one. Several candidates have no window. A list
+/// cut short is unknown: the owner may be one of the windows it is missing.
+pub fn pick_window(windows: &[Window], complete: bool, title: &str, owner_active: bool) -> Outcome<usize> {
+    if !complete {
+        return Outcome::Unknown;
+    }
     let only = |matching: Vec<usize>| match matching.as_slice() {
-        [one] => Some(Some(*one)),
+        [one] => Some(Outcome::Found(*one)),
         [] => None,
-        _ => Some(None),
+        _ => Some(Outcome::Nothing),
     };
     let named = (0..windows.len()).filter(|&i| !title.is_empty() && windows[i].name == title).collect();
     if let Some(found) = only(named) {
         return found;
     }
     if !owner_active {
-        return None;
+        return Outcome::Nothing;
     }
-    only((0..windows.len()).filter(|&i| windows[i].active).collect()).flatten()
+    only((0..windows.len()).filter(|&i| windows[i].active).collect()).unwrap_or(Outcome::Nothing)
+}
+
+/// The window of the compositor's `title` in the tree.
+pub fn locate<T: Tree>(tree: &T, title: &str, owner_active: bool) -> Outcome<T::Node> {
+    let Listing { windows, complete } = tree.windows();
+    let listed: Vec<Window> = windows.iter().map(|(_, window)| window.clone()).collect();
+    match pick_window(&listed, complete, title, owner_active) {
+        Outcome::Found(i) => Outcome::Found(windows[i].0.clone()),
+        Outcome::Nothing => Outcome::Nothing,
+        Outcome::Unknown => Outcome::Unknown,
+    }
+}
+
+/// The element at `point` of the window called `title` and its ancestors. A walk that ran out of
+/// time may have stopped above the element (a panel instead of its button): unknown.
+pub fn chain_at<T: Tree>(tree: &T, title: &str, owner_active: bool, point: (i32, i32)) -> Outcome<Vec<AxElement>> {
+    match locate(tree, title, owner_active) {
+        Outcome::Found(window) => {
+            let chain = element_at(tree, &window, point);
+            if tree.expired() {
+                Outcome::Unknown
+            } else if chain.is_empty() {
+                Outcome::Nothing
+            } else {
+                Outcome::Found(chain)
+            }
+        }
+        Outcome::Nothing => Outcome::Nothing,
+        Outcome::Unknown => Outcome::Unknown,
+    }
+}
+
+/// The focus of the front window called `title`; unknown when the walk ran out of time.
+pub fn focus_in<T: Tree>(tree: &T, title: &str) -> Outcome<Focus> {
+    match locate(tree, title, true) {
+        Outcome::Found(window) => {
+            let found = focused(tree, &window);
+            match found {
+                _ if tree.expired() => Outcome::Unknown,
+                Some(found) => Outcome::Found(found),
+                None => Outcome::Nothing,
+            }
+        }
+        Outcome::Nothing => Outcome::Nothing,
+        Outcome::Unknown => Outcome::Unknown,
+    }
+}
+
+/// What an element that could not be read is called when the risk check asks about it.
+const UNREADABLE: &str = "an element that could not be read";
+
+/// The chain for a click on an element that is not known: a button the risk check always asks about.
+pub fn unknown_chain() -> Vec<AxElement> {
+    let title = format!("{UNREADABLE} (it may send or delete)");
+    vec![AxElement { role: "AXButton".into(), title: Some(title), ..AxElement::default() }]
+}
+
+/// The focus when it is not known: a default button, so Return, Space, and typing ask.
+pub fn unknown_focus() -> Focus {
+    let element = AxElement { role: "AXButton".into(), title: Some(UNREADABLE.into()), ..AxElement::default() };
+    Focus { element, is_default_button: true, default_button: None }
 }
 
 /// `at` in a window's coordinates, for the first of the window's frames that holds it.
@@ -198,9 +277,13 @@ pub fn focused<T: Tree>(tree: &T, window: &T::Node) -> Option<Focus> {
 }
 
 /// How long one query may take, and how long it walks before it stops by itself: a stuck app
-/// must not stall the helper.
+/// must not stall the helper. Every D-Bus call has its own timeout too, so a worker is over
+/// within the walk budget plus one call (`STUCK_LIMIT`) and its slot is free again.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 const WALK_BUDGET: Duration = Duration::from_millis(400);
+const CALL_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(test)]
+const STUCK_LIMIT: Duration = Duration::from_millis(1000);
 /// How many queries may be stuck at once; more are refused instead of piling up threads.
 const MAX_WORKERS: usize = 3;
 
@@ -216,28 +299,76 @@ impl Drop for Live {
     }
 }
 
-/// Runs `work` on a thread of its own and waits at most `limit` for its answer. `None` when it
+/// Runs `work` on a thread of its own and waits at most `limit` for its answer. Unknown when it
 /// did not answer in time or `cap` earlier queries are still running; a late answer is dropped.
 pub fn within<T: Send + 'static>(
     workers: &Workers,
     cap: usize,
     limit: Duration,
-    work: impl FnOnce() -> Option<T> + Send + 'static,
-) -> Option<T> {
+    work: impl FnOnce() -> Outcome<T> + Send + 'static,
+) -> Outcome<T> {
     if workers.0.fetch_add(1, Ordering::AcqRel) >= cap {
         workers.0.fetch_sub(1, Ordering::AcqRel);
-        return None;
+        return Outcome::Unknown;
     }
     let live = Live(workers.0.clone());
     let (send, receive) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("computer-atspi".into())
-        .spawn(move || {
-            let _live = live;
-            let _ = send.send(work());
-        })
-        .ok()?;
-    receive.recv_timeout(limit).ok().flatten()
+    let spawned = std::thread::Builder::new().name("computer-atspi".into()).spawn(move || {
+        let _live = live;
+        let _ = send.send(work());
+    });
+    if spawned.is_err() {
+        return Outcome::Unknown;
+    }
+    receive.recv_timeout(limit).unwrap_or(Outcome::Unknown)
+}
+
+/// Whether turning accessibility on is done, running, or still to do. A failed attempt goes back
+/// to still to do, so the next query tries again.
+#[derive(Default)]
+pub struct EnableLatch(AtomicU8);
+
+impl EnableLatch {
+    const RUNNING: u8 = 1;
+    const DONE: u8 = 2;
+
+    /// Whether the caller should make the attempt now.
+    pub fn begin(&self) -> bool {
+        self.0.compare_exchange(0, Self::RUNNING, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    pub fn finish(&self, succeeded: bool) {
+        self.0.store(if succeeded { Self::DONE } else { 0 }, Ordering::Release);
+    }
+}
+
+/// A shared value made on demand (the D-Bus connection): a cached one that is no longer usable is
+/// made again, and a failed make is not cached.
+pub struct Cached<C>(Mutex<Option<C>>);
+
+impl<C> Default for Cached<C> {
+    fn default() -> Self {
+        Cached(Mutex::new(None))
+    }
+}
+
+impl<C: Clone> Cached<C> {
+    /// The cached value while `usable`, else a new one from `connect`. `connect` runs without
+    /// the lock, so a slow one does not hold the other queries.
+    pub fn get(&self, usable: impl Fn(&C) -> bool, connect: impl FnOnce() -> Option<C>) -> Option<C> {
+        let cached = self.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(cached) = cached.filter(|c| usable(c)) {
+            return Some(cached);
+        }
+        let made = connect();
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = made.clone();
+        made
+    }
+
+    /// Drops the cached value, so the next `get` makes a new one.
+    pub fn forget(&self) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -266,17 +397,22 @@ mod dbus {
         (!reference.0.is_empty() && reference.1.as_str() != NULL).then_some(reference)
     }
 
+    /// The session bus, with a timeout on every call: a stuck app must not hold a worker forever.
+    fn session(timeout: Duration) -> zbus::Result<Connection> {
+        connection::Builder::session()?.method_timeout(timeout).build()
+    }
+
     /// The accessibility bus, whose address the session bus gives.
     pub fn connect() -> Option<Connection> {
-        let session = Connection::session().ok()?;
+        let session = session(CALL_TIMEOUT).ok()?;
         let reply = session.call_method(Some("org.a11y.Bus"), "/org/a11y/bus", Some("org.a11y.Bus"), "GetAddress", &()).ok()?;
         let address: String = reply.body().deserialize().ok()?;
-        connection::Builder::address(address.as_str()).ok()?.build().ok()
+        connection::Builder::address(address.as_str()).ok()?.method_timeout(CALL_TIMEOUT).build().ok()
     }
 
     /// Tells the toolkits to expose their accessibles (`org.a11y.Status.IsEnabled`).
     pub fn turn_on() -> Result<(), String> {
-        let session = Connection::session().map_err(|e| e.to_string())?;
+        let session = session(Duration::from_secs(2)).map_err(|e| e.to_string())?;
         let body = ("org.a11y.Status", "IsEnabled", Value::from(true));
         session
             .call_method(Some("org.a11y.Bus"), "/org/a11y/bus", Some(PROPERTIES), "Set", &body)
@@ -288,6 +424,13 @@ mod dbus {
     pub struct Dbus {
         pub connection: Connection,
         pub deadline: Instant,
+        /// A call failed because the connection itself is broken (not an app's error or timeout).
+        pub broken: std::cell::Cell<bool>,
+    }
+
+    /// Whether an error says the connection is dead, not that one app failed or was slow.
+    fn transport_failed(error: &zbus::Error) -> bool {
+        matches!(error, zbus::Error::InputOutput(io) if io.kind() != std::io::ErrorKind::TimedOut)
     }
 
     impl Dbus {
@@ -301,13 +444,20 @@ mod dbus {
             if self.expired() {
                 return None;
             }
-            let reply = self.connection.call_method(Some(node.0.as_str()), node.1.as_str(), Some(interface), method, body).ok()?;
+            let reply = self.connection.call_method(Some(node.0.as_str()), node.1.as_str(), Some(interface), method, body);
+            let reply = reply.map_err(|error| self.broken.set(self.broken.get() || transport_failed(&error))).ok()?;
             reply.body().deserialize().ok()
         }
 
         fn property<R: TryFrom<OwnedValue>>(&self, node: &Reference, interface: &str, name: &str) -> Option<R> {
             let value: OwnedValue = self.call(node, PROPERTIES, "Get", &(interface, name))?;
             R::try_from(value).ok()
+        }
+
+        /// The children, or `None` when the call failed (told apart from a node without children).
+        fn try_children(&self, node: &Reference) -> Option<Vec<Reference>> {
+            let children: Vec<Reference> = self.call(node, ACCESSIBLE, "GetChildren", &())?;
+            Some(children.into_iter().filter_map(real).collect())
         }
 
         fn text(&self, node: &Reference) -> Option<String> {
@@ -346,16 +496,23 @@ mod dbus {
         }
 
         fn children(&self, node: &Reference) -> Vec<Reference> {
-            let children: Vec<Reference> = self.call(node, ACCESSIBLE, "GetChildren", &()).unwrap_or_default();
-            children.into_iter().filter_map(real).collect()
+            self.try_children(node).unwrap_or_default()
         }
 
-        fn windows(&self) -> Vec<(Reference, Window)> {
+        fn windows(&self) -> Listing<Reference> {
             let root = (REGISTRY.to_string(), OwnedObjectPath::try_from(ROOT).expect("a valid path"));
             let mut windows = Vec::new();
-            for app in self.children(&root) {
-                for node in self.children(&app) {
-                    let Some(states) = self.states(&node) else { continue };
+            let mut complete = true;
+            let apps = self.try_children(&root);
+            complete &= apps.is_some();
+            for app in apps.unwrap_or_default() {
+                let nodes = self.try_children(&app);
+                complete &= nodes.is_some();
+                for node in nodes.unwrap_or_default() {
+                    let Some(states) = self.states(&node) else {
+                        complete = false;
+                        continue;
+                    };
                     if has_state(&states, STATE_DEFUNCT) {
                         continue;
                     }
@@ -363,7 +520,8 @@ mod dbus {
                     windows.push((node, Window { name, active: has_state(&states, STATE_ACTIVE) }));
                 }
             }
-            windows
+            // Out of time: calls after the deadline were refused, so something may be missing.
+            Listing { windows, complete: complete && !self.expired() }
         }
 
         fn expired(&self) -> bool {
@@ -374,8 +532,8 @@ mod dbus {
 
 #[cfg(target_os = "linux")]
 struct Shared {
-    connection: Mutex<Option<zbus::blocking::Connection>>,
-    enabled: AtomicBool,
+    connection: Cached<zbus::blocking::Connection>,
+    enabled: EnableLatch,
 }
 
 #[cfg(target_os = "linux")]
@@ -390,7 +548,7 @@ pub struct Atspi {
 impl Default for Atspi {
     fn default() -> Self {
         Atspi {
-            shared: Arc::new(Shared { connection: Mutex::new(None), enabled: AtomicBool::new(false) }),
+            shared: Arc::new(Shared { connection: Cached::default(), enabled: EnableLatch::default() }),
             workers: Workers::default(),
         }
     }
@@ -398,62 +556,64 @@ impl Default for Atspi {
 
 #[cfg(target_os = "linux")]
 impl Atspi {
-    /// Asks the toolkits to expose their accessibles, once, from this process only and without
-    /// any prompt. Never waits: it runs on a thread of its own.
+    /// Asks the toolkits to expose their accessibles, from this process only and without any
+    /// prompt, until it worked once: a failed attempt is tried again by the next query. Never
+    /// waits: it runs on a thread of its own.
     pub fn enable(&self) {
-        if self.shared.enabled.swap(true, Ordering::AcqRel) {
+        if !self.shared.enabled.begin() {
             return;
         }
-        let spawned = std::thread::Builder::new().name("computer-atspi-enable".into()).spawn(|| {
-            if let Err(error) = dbus::turn_on() {
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new().name("computer-atspi-enable".into()).spawn(move || {
+            let result = dbus::turn_on();
+            if let Err(error) = &result {
                 eprintln!("gentle-dot: cannot turn accessibility on: {error}");
             }
+            shared.enabled.finish(result.is_ok());
         });
         if spawned.is_err() {
-            self.shared.enabled.store(false, Ordering::Release);
+            self.shared.enabled.finish(false);
         }
     }
 
-    fn run<T: Send + 'static>(&self, work: impl FnOnce(&dbus::Dbus) -> Option<T> + Send + 'static) -> Option<T> {
+    fn run<T: Send + 'static>(&self, work: impl FnOnce(&dbus::Dbus) -> Outcome<T> + Send + 'static) -> Outcome<T> {
         let shared = self.shared.clone();
         within(&self.workers, MAX_WORKERS, QUERY_TIMEOUT, move || {
-            let connection = {
-                let mut slot = shared.connection.lock().unwrap_or_else(|p| p.into_inner());
-                if slot.is_none() {
-                    *slot = dbus::connect();
-                }
-                slot.clone()?
+            // A connection that closed is replaced; no bus at all reads as nothing to find.
+            let Some(connection) = shared.connection.get(|c| !c.is_closed(), dbus::connect) else {
+                return Outcome::Nothing;
             };
-            work(&dbus::Dbus { connection, deadline: Instant::now() + WALK_BUDGET })
+            let tree = dbus::Dbus { connection, deadline: Instant::now() + WALK_BUDGET, broken: std::cell::Cell::new(false) };
+            let outcome = work(&tree);
+            if tree.broken.get() {
+                shared.connection.forget();
+            }
+            outcome
         })
     }
 
     /// The element at `point` (in the window's coordinates) of the window the compositor calls
-    /// `title`, then its ancestors; empty when unknown.
+    /// `title`, then its ancestors; empty when there is none, and an element the risk check asks
+    /// about when it could not be read in time.
     pub fn element_at(&self, title: &str, owner_active: bool, point: (i32, i32)) -> Vec<AxElement> {
         let title = title.to_string();
-        self.run(move |tree| {
-            let windows = tree.windows();
-            let node = window_of(&windows, &title, owner_active)?;
-            Some(element_at(tree, node, point))
-        })
-        .unwrap_or_default()
+        match self.run(move |tree| chain_at(tree, &title, owner_active, point)) {
+            Outcome::Found(chain) => chain,
+            Outcome::Nothing => Vec::new(),
+            Outcome::Unknown => unknown_chain(),
+        }
     }
 
-    /// The focused element of the front window, which the compositor calls `title`.
+    /// The focused element of the front window, which the compositor calls `title`; a focus the
+    /// risk check asks about when it could not be read in time.
     pub fn focused(&self, title: &str) -> Option<Focus> {
         let title = title.to_string();
-        self.run(move |tree| {
-            let windows = tree.windows();
-            focused(tree, window_of(&windows, &title, true)?)
-        })
+        match self.run(move |tree| focus_in(tree, &title)) {
+            Outcome::Found(found) => Some(found),
+            Outcome::Nothing => None,
+            Outcome::Unknown => Some(unknown_focus()),
+        }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn window_of<'a, N>(windows: &'a [(N, Window)], title: &str, owner_active: bool) -> Option<&'a N> {
-    let listed: Vec<Window> = windows.iter().map(|(_, window)| window.clone()).collect();
-    pick_window(&listed, title, owner_active).map(|i| &windows[i].0)
 }
 
 #[cfg(test)]
@@ -571,22 +731,99 @@ mod tests {
     fn the_window_is_picked_by_title_or_by_being_the_only_active_one() {
         let win = |name: &str, active: bool| Window { name: name.into(), active };
         let one = [win("Mail", false), win("Notes", true)];
-        for (windows, title, owner_active, expected) in [
-            (&one[..], "Mail", false, Some(0)),
-            (&one[..], "Notes", true, Some(1)),
+        let found = |i: usize| Outcome::Found(i);
+        for (windows, complete, title, owner_active, expected) in [
+            (&one[..], true, "Mail", false, found(0)),
+            (&one[..], true, "Notes", true, found(1)),
             // No title match: only the active window of an active owner.
-            (&one[..], "Renamed", true, Some(1)),
-            (&one[..], "Renamed", false, None),
-            (&one[..], "", true, Some(1)),
+            (&one[..], true, "Renamed", true, found(1)),
+            (&one[..], true, "Renamed", false, Outcome::Nothing),
+            (&one[..], true, "", true, found(1)),
             // Two windows with the title: not known.
-            (&[win("Doc", false), win("Doc", false)][..], "Doc", false, None),
-            (&[win("Doc", true), win("Doc", false)][..], "Doc", true, None),
+            (&[win("Doc", false), win("Doc", false)][..], true, "Doc", false, Outcome::Nothing),
+            (&[win("Doc", true), win("Doc", false)][..], true, "Doc", true, Outcome::Nothing),
             // Two active windows and no title match.
-            (&[win("A", true), win("B", true)][..], "C", true, None),
-            (&[][..], "Mail", true, None),
+            (&[win("A", true), win("B", true)][..], true, "C", true, Outcome::Nothing),
+            (&[][..], true, "Mail", true, Outcome::Nothing),
+            // A list cut short could be missing the real window: never a pick, never "none".
+            (&one[..], false, "Mail", false, Outcome::Unknown),
+            (&one[..], false, "Renamed", true, Outcome::Unknown),
+            (&[][..], false, "Mail", true, Outcome::Unknown),
         ] {
-            assert_eq!(pick_window(windows, title, owner_active), expected, "{title} {owner_active}");
+            assert_eq!(pick_window(windows, complete, title, owner_active), expected, "{title} {owner_active} {complete}");
         }
+    }
+
+    #[test]
+    fn a_window_list_cut_short_or_a_walk_out_of_time_is_unknown_not_empty() {
+        let (mut tree, _) = app();
+        let at = (750, 550);
+        assert!(matches!(chain_at(&tree, "Chat", true, at), Outcome::Found(chain) if chain[0].title.as_deref() == Some("Send")));
+        assert_eq!(chain_at(&tree, "Other", false, at), Outcome::Nothing);
+        assert!(matches!(focus_in(&tree, "Chat"), Outcome::Found(_)));
+        // The list of windows stopped early (an app did not answer): the owner may be missing.
+        tree.partial = true;
+        assert_eq!(chain_at(&tree, "Chat", true, at), Outcome::Unknown);
+        assert_eq!(focus_in(&tree, "Chat"), Outcome::Unknown);
+        // The walk ran out of time after the window was found.
+        tree.partial = false;
+        tree.expired_after.set(3);
+        assert_eq!(chain_at(&tree, "Chat", true, at), Outcome::Unknown);
+        tree.expired_after.set(3);
+        assert_eq!(focus_in(&tree, "Chat"), Outcome::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_element_asks_for_every_kind_of_action() {
+        let unknown = unknown_chain();
+        assert!(assess(Act::Click(&unknown), None).is_some());
+        assert!(assess(Act::Drag(&unknown, &[]), None).is_some());
+        let focus = unknown_focus();
+        assert!(assess(Act::Return(Some(&focus)), None).is_some());
+        assert!(assess(Act::Space(Some(&focus)), None).is_some());
+        assert!(assess(Act::Type("a b", Some(&focus)), None).is_some());
+        assert!(assess(Act::Type("abc", Some(&focus)), None).is_none());
+    }
+
+    #[test]
+    fn an_enable_that_failed_is_tried_again_but_never_twice_at_once() {
+        let latch = EnableLatch::default();
+        assert!(latch.begin());
+        assert!(!latch.begin(), "one attempt at a time");
+        latch.finish(false);
+        assert!(latch.begin(), "a failed attempt is retried");
+        latch.finish(true);
+        assert!(!latch.begin() && !latch.begin(), "a success is kept");
+    }
+
+    #[test]
+    fn a_dead_connection_is_replaced_and_a_forgotten_one_is_made_again() {
+        let cache = Cached::<u32>::default();
+        let made = std::cell::Cell::new(0);
+        let connect = || {
+            made.set(made.get() + 1);
+            Some(made.get())
+        };
+        assert_eq!(cache.get(|_| true, connect), Some(1));
+        assert_eq!(cache.get(|_| true, connect), Some(1));
+        // The cached one died: a new one takes its place.
+        assert_eq!(cache.get(|c| *c != 1, connect), Some(2));
+        assert_eq!(cache.get(|_| true, connect), Some(2));
+        cache.forget();
+        assert_eq!(cache.get(|_| true, connect), Some(3));
+        // No bus: nothing is cached, and the next query tries again.
+        cache.forget();
+        assert_eq!(cache.get(|_| true, || None), None);
+        assert_eq!(cache.get(|_| true, connect), Some(4));
+    }
+
+    #[test]
+    fn a_stuck_call_ends_by_itself_soon_after_its_query_gave_up() {
+        // Every D-Bus call has its own timeout, so a worker is over within the walk budget plus
+        // one call, and the few slots free up again.
+        assert!(WALK_BUDGET + CALL_TIMEOUT <= STUCK_LIMIT);
+        assert!(CALL_TIMEOUT < QUERY_TIMEOUT);
+        assert!(QUERY_TIMEOUT < STUCK_LIMIT);
     }
 
     #[test]
@@ -608,6 +845,8 @@ mod tests {
     struct Fake {
         nodes: Vec<FakeNode>,
         windows: Vec<(usize, Window)>,
+        /// The list of windows stopped early.
+        partial: bool,
         expired_after: std::cell::Cell<usize>,
     }
 
@@ -621,7 +860,7 @@ mod tests {
 
     impl Fake {
         fn new() -> Fake {
-            Fake { nodes: Vec::new(), windows: Vec::new(), expired_after: std::cell::Cell::new(usize::MAX) }
+            Fake { nodes: Vec::new(), windows: Vec::new(), partial: false, expired_after: std::cell::Cell::new(usize::MAX) }
         }
 
         fn add(&mut self, parent: Option<usize>, rect: (i32, i32, i32, i32), role_name: &str, name: &str, states: &[u32]) -> usize {
@@ -661,8 +900,8 @@ mod tests {
             self.nodes[*node].children.clone()
         }
 
-        fn windows(&self) -> Vec<(usize, Window)> {
-            self.windows.clone()
+        fn windows(&self) -> Listing<usize> {
+            Listing { windows: self.windows.clone(), complete: !self.partial }
         }
 
         fn expired(&self) -> bool {
@@ -746,22 +985,27 @@ mod tests {
     fn a_query_that_does_not_answer_is_given_up_and_cannot_pile_up() {
         let workers = Workers::default();
         let ms = Duration::from_millis;
-        assert_eq!(within(&workers, 1, ms(500), || Some(7)), Some(7));
-        assert_eq!(within::<i32>(&workers, 1, ms(500), || None), None);
+        assert_eq!(within(&workers, 1, ms(500), || Outcome::Found(7)), Outcome::Found(7));
+        assert_eq!(within::<i32>(&workers, 1, ms(500), || Outcome::Nothing), Outcome::Nothing);
         // A stuck query: the caller gives up at the limit, and a second one is refused at once.
         let (release, stuck) = mpsc::channel::<()>();
         let started = Instant::now();
-        assert_eq!(within(&workers, 1, ms(30), move || stuck.recv().ok().map(|_| 1)), None);
+        let gave_up = within(&workers, 1, ms(30), move || stuck.recv().ok().map_or(Outcome::Nothing, |_| Outcome::Found(1)));
+        assert_eq!(gave_up, Outcome::Unknown);
         assert!(started.elapsed() < ms(400));
+        // Refused is unknown, never "nothing there": the risk checks ask instead of allowing.
         let started = Instant::now();
-        assert_eq!(within(&workers, 1, ms(5000), || Some(2)), None);
+        assert_eq!(within(&workers, 1, ms(5000), || Outcome::Found(2)), Outcome::Unknown);
         assert!(started.elapsed() < ms(400));
         // Once it ends, queries run again.
         drop(release);
-        let again = (0..100).find_map(|_| within(&workers, 1, ms(500), || Some(3)).or_else(|| {
-            std::thread::sleep(ms(10));
-            None
-        }));
+        let again = (0..100).find_map(|_| match within(&workers, 1, ms(500), || Outcome::Found(3)) {
+            Outcome::Found(three) => Some(three),
+            _ => {
+                std::thread::sleep(ms(10));
+                None
+            }
+        });
         assert_eq!(again, Some(3));
     }
 }
