@@ -551,6 +551,10 @@ fn build_linux_glow(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
         .decorations(false).always_on_top(true).resizable(false).skip_taskbar(true)
         .visible_on_all_workspaces(true).shadow(false).focused(false).focusable(false).visible(false)
         .build().map_err(|error| error.to_string())?;
+    // tao unwraps the GdkWindow to set the input shape, and a window never shown has none yet:
+    // realizing it creates one without mapping it. Main thread only (setup).
+    use gtk::prelude::WidgetExt;
+    window.gtk_window().map_err(|error| error.to_string())?.realize();
     window.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
     Ok(window)
 }
