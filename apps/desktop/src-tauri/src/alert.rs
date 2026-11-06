@@ -190,6 +190,7 @@ mod macos {
         }
         let (answer, answered) = std::sync::mpsc::channel();
         let (title, message) = (title.to_owned(), message.to_owned());
+        let handle = app.clone();
         let scheduled = app.run_on_main_thread(move || {
             let response = MainThreadMarker::new().map(|mtm| run(mtm, &title, &message, choice));
             let _ = answer.send(response);
@@ -222,7 +223,20 @@ mod linux {
     use gtk::prelude::*;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
-    use tauri::AppHandle;
+    use tauri::{AppHandle, Manager};
+
+    /// The size a layer-surface dialog is pinned to; a minimum, the text may grow it.
+    const LAYER_DIALOG_SIZE: (i32, i32) = (440, 170);
+
+    /// The same decision as the Dot's and the panel's (T14), so the dialog is a layer surface
+    /// exactly where they are.
+    fn uses_layer_shell() -> bool {
+        crate::platform::uses_layer_shell(
+            crate::platform::Os::CURRENT,
+            |key| std::env::var(key).ok(),
+            crate::layer::supported(),
+        )
+    }
 
     pub fn ask(
         app: &AppHandle,
@@ -248,7 +262,8 @@ mod linux {
         let watch = requested.clone();
         let (answer, answered) = std::sync::mpsc::channel();
         let (title, message) = (title.to_owned(), message.to_owned());
-        let scheduled = app.run_on_main_thread(move || show(&title, &message, choice, watch, deadline, answer));
+        let handle = app.clone();
+        let scheduled = app.run_on_main_thread(move || show(&title, &message, choice, watch, deadline, answer, &handle));
         if scheduled.is_err() {
             return false;
         }
@@ -275,6 +290,7 @@ mod linux {
         requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
         deadline: Option<Instant>,
         answer: std::sync::mpsc::Sender<Option<i32>>,
+        app: &AppHandle,
     ) {
         if refuse_due(false, deadline, Instant::now()) {
             let _ = answer.send(Some(i32::from(GTK_REFUSE_ID)));
@@ -297,7 +313,15 @@ mod linux {
         dialog.set_default_response(gtk::ResponseType::Other(GTK_REFUSE_ID));
         refuse_button.grab_focus();
         // Gentle Dot's windows sit under the app being controlled; this one has to be seen.
-        dialog.set_keep_above(true);
+        // `set_keep_above` does nothing on Wayland, where the dialog fell behind the focused
+        // window; where the Dot is a layer surface, so is the dialog (T15e). It is initialized
+        // here, before its first show.
+        if uses_layer_shell() {
+            let dot = app.get_webview_window(crate::shell::DOT).and_then(|window| window.gtk_window().ok());
+            crate::layer::init_dialog(dialog.upcast_ref(), LAYER_DIALOG_SIZE, dot.as_ref());
+        } else {
+            dialog.set_keep_above(true);
+        }
         let answer = std::cell::RefCell::new(Some(answer));
         dialog.connect_response(move |dialog, response| {
             if let Some(answer) = answer.borrow_mut().take() {

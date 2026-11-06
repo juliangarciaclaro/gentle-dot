@@ -16,6 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub const NAMESPACE: &str = "gentle-dot";
+const DIALOG_NAMESPACE: &str = "gentle-dot-dialog";
 
 /// The exclusive zone that ignores other surfaces' zones, so margins count from the output's real
 /// corner (a panel or dock at an edge would otherwise move the origin by an amount we cannot read).
@@ -118,6 +119,45 @@ pub fn fill_output(window: &gtk::ApplicationWindow, output: usize) -> Result<(),
 pub fn restore_corner(window: &gtk::ApplicationWindow) {
     window.set_exclusive_zone(IGNORE_OTHER_ZONES);
     anchor_top_left(window);
+}
+
+/// Which output a confirmation dialog opens on: the one under the pointer, else the Dot's, else
+/// `None` (the compositor picks). A pointer that is on no output (stale or not reported) does not
+/// count.
+fn dialog_output(pointer: Option<(i32, i32)>, dot_output: Option<usize>, outputs: &[Rect]) -> Option<usize> {
+    let under_pointer = pointer.and_then(|(x, y)| {
+        outputs.iter().position(|o| x >= o.x && x < o.x + o.width && y >= o.y && y < o.y + o.height)
+    });
+    under_pointer.or(dot_output.filter(|index| *index < outputs.len()))
+}
+
+/// The pointer's global position in logical points, as GDK last saw it.
+fn pointer_position() -> Option<(i32, i32)> {
+    let (_, x, y) = pointer_seat()?.pointer()?.position();
+    Some((x, y))
+}
+
+/// Makes a confirmation dialog a layer surface: `Overlay` (above every window, which
+/// `set_keep_above` cannot do on Wayland), centred on one output (no anchors), keyboard on demand
+/// so it takes the focus when shown and Return/Escape work while the user can still reach other
+/// apps. `dot` is the Dot's window, whose output is used when the pointer's is unknown. Must run
+/// before the dialog is realized; `size` is pinned first for the same reason as in `init` (T15b).
+pub fn init_dialog(dialog: &gtk::Window, size: (i32, i32), dot: Option<&gtk::ApplicationWindow>) {
+    dialog.set_size_request(size.0, size.1);
+    dialog.init_layer_shell();
+    dialog.set_namespace(DIALOG_NAMESPACE);
+    dialog.set_layer(Layer::Overlay);
+    dialog.set_keyboard_mode(KeyboardMode::OnDemand);
+    dialog.set_exclusive_zone(IGNORE_OTHER_ZONES);
+    for edge in [Edge::Top, Edge::Left, Edge::Bottom, Edge::Right] {
+        dialog.set_anchor(edge, false);
+    }
+    let monitors = monitors();
+    let rects: Vec<Rect> = monitors.iter().map(rect_of).collect();
+    let dot_output = dot.and_then(|dot| dot.monitor()).and_then(|monitor| monitors.iter().position(|m| *m == monitor));
+    if let Some(index) = dialog_output(pointer_position(), dot_output, &rects) {
+        dialog.set_monitor(&monitors[index]);
+    }
 }
 
 /// What the pointer does to the Dot once a press on it becomes a drag.
@@ -238,5 +278,29 @@ pub fn watch_dot_drag(
                 Propagation::Proceed
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dialog_opens_on_the_pointers_output_else_the_dots() {
+        let outputs = [Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1080)];
+        // (pointer, the Dot's output, expected)
+        let cases = [
+            (Some((2000, 10)), Some(0), Some(1)),
+            (Some((10, 10)), Some(1), Some(0)),
+            (None, Some(1), Some(1)),
+            (Some((-50, 5000)), Some(1), Some(1)),
+            (None, None, None),
+            (Some((5000, 5000)), None, None),
+            (None, Some(7), None),
+        ];
+        for (pointer, dot, expected) in cases {
+            assert_eq!(dialog_output(pointer, dot, &outputs), expected, "{pointer:?} {dot:?}");
+        }
+        assert_eq!(dialog_output(Some((1, 1)), Some(0), &[]), None);
     }
 }
