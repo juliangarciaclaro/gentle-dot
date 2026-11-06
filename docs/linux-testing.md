@@ -230,8 +230,8 @@ In the chat, ask "Take a screenshot and tell me which app is in front".
 
 Then check each of these and note any that fail:
 
-1. **Typing:** open a text editor and ask "type Hello, ñandú! in the editor and press Return". The text arrives exactly, accents included.
-2. **Full desktop control (Wayland only):** ask "click the editor's File menu". The assistant says pointer actions need full desktop control. Open **Connectors → Computer** and choose **Grant**. If Gentle Dot says it cannot write `/dev/uinput`, add the udev rule it names, run the two `udevadm` commands, and grant again. A dialog asks to turn it on, with Cancel as the default; choose to turn it on and ask again. The menu opens. On X11 the click works without this step.
+1. **Full desktop control (Wayland only):** open a text editor and ask "click the editor's File menu". The assistant says it needs full desktop control to click, type, or press keys. Open **Connectors → Computer** and choose **Grant**. If Gentle Dot says it cannot write `/dev/uinput`, add the udev rule it names, run the two `udevadm` commands, and grant again. A dialog asks to turn it on, with Cancel as the default; choose to turn it on and ask again. The menu opens. On X11 the click works without this step.
+2. **Typing:** ask "type Hello, ñandú! in the editor and press Return". The text arrives exactly, accents included.
 3. **Pointer:** ask it to drag a file on the desktop and to scroll a long web page, on each monitor if you have several. The pointer lands where it should, the drag ends where it should, and the page scrolls in the direction asked.
 4. **Risky actions:** in an email or chat app, write a message and ask the assistant to click Send. A Gentle Dot dialog asks before the click, with the refusing answer as the default. Choose to refuse: nothing is sent.
 5. **Stale approval (needs step 17's connector):** ask for a connector action that sends and leave its Gentle Dot dialog open for more than two minutes without answering. The dialog goes away by itself, and nothing is sent.

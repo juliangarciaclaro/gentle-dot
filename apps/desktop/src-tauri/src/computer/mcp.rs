@@ -55,6 +55,12 @@ const STOPPED: &str = "Computer control was stopped; this action was dropped.";
 const NOT_ALLOWED: &str = "Computer control was not allowed by the user. Nothing was done.";
 const NEEDS_PERMISSION: &str = "Gentle Dot needs the";
 const GRANT_IT: &str = "Ask the user to grant it in Connectors → Computer.";
+/// Why an action that clicks, types, or presses keys was refused.
+#[cfg(not(target_os = "linux"))]
+const NEEDS_INPUT: &str = "Gentle Dot needs the Accessibility permission. Ask the user to grant it in Connectors → Computer.";
+#[cfg(target_os = "linux")]
+const NEEDS_INPUT: &str = "Gentle Dot needs full desktop control to click, type, or press keys. \
+Ask the user to turn it on in Connectors → Computer.";
 const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels of the latest screenshot.";
 const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the action was refused. \
 Take a new screenshot and try again.";
@@ -573,7 +579,7 @@ impl Helper {
             return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
         }
         if acts && !permissions.accessibility {
-            return Err(format!("{NEEDS_PERMISSION} Accessibility permission. {GRANT_IT}"));
+            return Err(NEEDS_INPUT.to_string());
         }
         Ok(())
     }
@@ -1384,7 +1390,16 @@ mod tests {
         rig.desktop.permissions.lock().unwrap().screen_recording = true;
         rig.desktop.permissions.lock().unwrap().accessibility = false;
         let result = rig.call("key", json!({"combo": "tab"}));
+        #[cfg(not(target_os = "linux"))]
         assert!(first_text(&result).contains("Accessibility"), "{result}");
+        // Linux has no Accessibility permission: keys and the pointer need full desktop control.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            first_text(&result),
+            "Gentle Dot needs full desktop control to click, type, or press keys. \
+             Ask the user to turn it on in Connectors → Computer.",
+            "{result}"
+        );
         assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 0);
     }
 

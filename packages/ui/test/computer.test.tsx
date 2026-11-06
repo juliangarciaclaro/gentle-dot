@@ -14,7 +14,7 @@ const WINDOWS_2004_NOTE =
 const YOLO_NOTE_WITHOUT_PANIC =
 	"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop still works.";
 const LINUX_WAYLAND_NOTE =
-	"On Wayland, Gentle Dot needs full desktop control to use the pointer; it uses a virtual input device (uinput).";
+	"On Wayland, Gentle Dot needs full desktop control to click, type, or press keys; the pointer uses a virtual input device (uinput).";
 const UNKNOWN_WINDOWS_NOTE =
 	"Gentle Dot cannot tell which Windows version this is, so computer control is unavailable: screenshots need Windows 10 version 2004 (build 19041) or newer.";
 

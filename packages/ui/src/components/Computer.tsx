@@ -34,7 +34,7 @@ const LINUX_PERMISSIONS: [ComputerPermission, string][] = [
 	["screenRecording", "Screenshots"],
 ];
 const LINUX_WAYLAND_NOTE =
-	"On Wayland, Gentle Dot needs full desktop control to use the pointer; it uses a virtual input device (uinput).";
+	"On Wayland, Gentle Dot needs full desktop control to click, type, or press keys; the pointer uses a virtual input device (uinput).";
 
 export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
