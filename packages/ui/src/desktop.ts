@@ -41,20 +41,16 @@ export function openUrl(url: string): void {
 
 /**
  * Whether the app moves the Dot itself (Wayland layer surface, S9), which `startDragging` cannot:
- * then the UI sends its pointer movement with `dragDotBy` and ends with `endDotDrag`.
+ * it follows the pointer from GTK and the UI only keeps the end of a drag from being a click.
  */
 export function dotDragsByLayer(): Promise<boolean> {
 	return invoke<boolean>("dot_drag_mode");
 }
 
-/** Moves the Dot by the pointer's movement since the press, in points. */
-export function dragDotBy(dx: number, dy: number): Promise<void> {
-	return invoke<void>("drag_dot_by", { dx, dy });
-}
-
-/** The pointer was released: the app snaps the Dot to the nearest edge and saves its place. */
-export function endDotDrag(): void {
-	void invoke("end_dot_drag");
+/** Calls `listener` when the app starts dragging the Dot itself (`dotDragsByLayer`). */
+export function onDotDragStarted(listener: () => void): () => void {
+	const unlisten = onDesktopEvent("dot://dot-drag-started", listener);
+	return () => void unlisten.then((off) => off());
 }
 
 export async function startDragging(): Promise<void> {
@@ -67,7 +63,7 @@ export async function startDragging(): Promise<void> {
  * assistant), so a window it refused can ask `connection_info` again (S35.2).
  */
 export async function onDesktopEvent(
-	name: "dot://new-conversation" | "dot://panel-shown" | "dot://assistant-ready",
+	name: "dot://new-conversation" | "dot://panel-shown" | "dot://assistant-ready" | "dot://dot-drag-started",
 	handler: () => void,
 ) {
 	if (!inDesktop()) return () => {};

@@ -48,14 +48,14 @@ const PANEL_SIZE: (f64, f64) = (420.0, 640.0);
 /// All placement runs in points (see `geometry`), so margins never depend on a scale factor.
 const EDGE_MARGIN: i32 = 12;
 const PANEL_GAP: i32 = 8;
-/// The largest drag offset a layer Dot takes, in points: wider than any monitor layout.
-const DRAG_OFFSET_MAX: f64 = 100_000.0;
 const DRAG_SETTLE: Duration = Duration::from_millis(300);
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 /// Sent to the Dot and the panel each time the assistant this app may use starts answering (at
 /// launch or after Restart assistant): a window that was refused, or whose `connection_info` gave up
 /// first, asks again and connects without a reopen (S35.2).
 const ASSISTANT_READY: &str = "dot://assistant-ready";
+/// Sent when a press on the layer Dot becomes a drag, so its UI does not read the release as a click.
+const DOT_DRAG_STARTED: &str = "dot://dot-drag-started";
 
 struct Shell {
     config: DesktopConfig,
@@ -80,8 +80,6 @@ struct Shell {
 #[derive(Default)]
 struct LayerState {
     dot: Mutex<(i32, i32)>,
-    /// Where the Dot was when the current drag began; `None` between drags.
-    drag_start: Mutex<Option<(i32, i32)>>,
     /// Where the panel was last placed; `None` until its first show.
     panel: Mutex<Option<(i32, i32)>>,
 }
@@ -674,53 +672,63 @@ fn dot_rect_at((x, y): (i32, i32)) -> Rect {
     Rect::new(x, y, DOT_SIZE.0 as i32, DOT_SIZE.1 as i32)
 }
 
-/// How the UI drags the Dot: `true` when it is a layer surface, which `startDragging` cannot move.
-/// The UI then sends its own movement to `drag_dot_by` and `end_dot_drag`.
+/// How the Dot is dragged: `true` when it is a layer surface, which `startDragging` cannot move.
+/// The app then follows the pointer itself (`watch_layer_dot`) and the UI only keeps the click
+/// from firing at the end of a drag.
 #[tauri::command]
 fn dot_drag_mode(app: AppHandle) -> bool {
     app.state::<Shell>().layer.is_some()
 }
 
-/// Where a layer Dot dragged from `start` goes for the pointer's movement since the press, or
-/// `None` for an offset that is not a number. COSMIC reports the pointer relative to where the
-/// surface was when the button went down for the whole drag (L34), so the offset counts from the
-/// drag's start, never from where the Dot is now.
-fn dragged_dot(start: (i32, i32), dx: f64, dy: f64) -> Option<(i32, i32)> {
-    if !dx.is_finite() || !dy.is_finite() {
-        return None;
-    }
-    // `as` saturates, and the sum saturates too: a wild offset stops at the edge of the range.
-    let offset = |value: f64| value.clamp(-DRAG_OFFSET_MAX, DRAG_OFFSET_MAX).round() as i32;
-    Some((start.0.saturating_add(offset(dx)), start.1.saturating_add(offset(dy))))
+/// Layer mode: the Dot follows the pointer for the whole drag. The web view stops getting pointer
+/// events once the pointer leaves the Dot's own square (L39), but GTK keeps getting them while the
+/// button is down, so the drag is tracked on the Dot's GTK widgets (main thread).
+#[cfg(target_os = "linux")]
+fn watch_layer_dot(app: &AppHandle, dot: &gtk::ApplicationWindow) {
+    let (here, moved, window) = (app.clone(), app.clone(), dot.clone());
+    crate::layer::watch_dot_drag(
+        dot,
+        move || {
+            let shell = here.state::<Shell>();
+            shell.layer.as_ref().map_or((0, 0), |layer| *layer.dot.lock().unwrap())
+        },
+        move |event| {
+            let shell = moved.state::<Shell>();
+            let Some(layer) = shell.layer.as_ref().map(|layer| &layer.dot) else { return };
+            match event {
+                crate::layer::DotEvent::Moved(step) => {
+                    if let Err(error) = crate::layer::place(&window, dot_rect_at(step.to)) {
+                        eprintln!("gentle-dot: cannot move the Dot: {error}");
+                        return;
+                    }
+                    *layer.lock().unwrap() = step.to;
+                    if step.started {
+                        let _ = moved.emit(DOT_DRAG_STARTED, ());
+                    }
+                }
+                crate::layer::DotEvent::Dropped => {
+                    if let Err(error) = drop_layer_dot(&moved) {
+                        eprintln!("gentle-dot: cannot drop the Dot: {error}");
+                    }
+                }
+            }
+        },
+    );
 }
 
-/// Moves the layer Dot to where the drag started plus the pointer's movement since the press
-/// (client coordinates, which are points). The first call of a drag records the start.
-#[tauri::command]
-fn drag_dot_by(app: AppHandle, dx: f64, dy: f64) -> CommandResult {
-    let shell = app.state::<Shell>();
-    let layer = shell.layer.as_ref().ok_or("the Dot is dragged by its window here")?;
-    let start = *layer.drag_start.lock().unwrap().get_or_insert(*layer.dot.lock().unwrap());
-    let next = dragged_dot(start, dx, dy).ok_or("the drag offset is not a number")?;
-    layer_place(&app, DOT, dot_rect_at(next))?;
-    *layer.dot.lock().unwrap() = next;
-    Ok(())
-}
-
-/// The pointer was released: snaps the layer Dot to the nearest edge of its output, saves the
+/// The layer Dot was let go after a drag: snaps it to the nearest edge of its output, saves the
 /// spot, and brings a visible panel along.
-#[tauri::command]
-fn end_dot_drag(app: AppHandle) -> CommandResult {
+#[cfg(target_os = "linux")]
+fn drop_layer_dot(app: &AppHandle) -> CommandResult {
     let shell = app.state::<Shell>();
     let layer = shell.layer.as_ref().ok_or("the Dot is dragged by its window here")?;
-    *layer.drag_start.lock().unwrap() = None;
     let current = dot_rect_at(*layer.dot.lock().unwrap());
-    let (x, y) = geometry::snap_to_edge(current, &layer_outputs(&app)?, EDGE_MARGIN);
-    layer_place(&app, DOT, dot_rect_at((x, y)))?;
+    let (x, y) = geometry::snap_to_edge(current, &layer_outputs(app)?, EDGE_MARGIN);
+    layer_place(app, DOT, dot_rect_at((x, y)))?;
     *layer.dot.lock().unwrap() = (x, y);
     position::save(&desktop_file(&shell.config), DotPosition { x, y }).map_err(err)?;
-    if window(&app, PANEL)?.is_visible().unwrap_or(false) {
-        place_panel(&app)?;
+    if window(app, PANEL)?.is_visible().unwrap_or(false) {
+        place_panel(app)?;
     }
     Ok(())
 }
@@ -890,6 +898,7 @@ fn build_layer_windows(
     let size = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
     crate::layer::init_dot(&dot_window, size);
     crate::layer::init_panel(&panel_window, (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32));
+    watch_layer_dot(app, &dot_window);
     let outputs = crate::layer::outputs();
     let saved = position::load(&desktop_file(config)).map(|p| (p.x, p.y));
     let start = geometry::initial_dot_position(saved, size, &outputs, crate::layer::primary_output(), EDGE_MARGIN)
@@ -1136,8 +1145,6 @@ pub fn run() {
             set_rose_hidden,
             set_panel_fullscreen,
             dot_drag_mode,
-            drag_dot_by,
-            end_dot_drag,
             shortcut_get,
             shortcut_set,
             connector_command,
@@ -1332,40 +1339,19 @@ mod tests {
     }
 
     #[test]
-    fn a_layer_drag_counts_the_offset_from_where_the_dot_started() {
-        // (start, dx, dy, expected)
-        let cases = [
-            ((1836, 166), 0.0, 0.0, Some((1836, 166))),
-            ((1836, 166), -936.4, 374.6, Some((900, 541))),
-            // The same offset twice lands on the same spot: nothing accumulates.
-            ((1836, 166), -936.4, 374.6, Some((900, 541))),
-            // A huge offset is bounded, never wraps.
-            ((i32::MAX - 10, 0), 1e12, 0.0, Some((i32::MAX, 0))),
-            ((0, 0), f64::NAN, 0.0, None),
-            ((0, 0), 0.0, f64::INFINITY, None),
-        ];
-        for (start, dx, dy, expected) in cases {
-            assert_eq!(dragged_dot(start, dx, dy), expected, "{start:?} {dx} {dy}");
-        }
-    }
-
-    #[test]
-    fn the_drag_commands_are_registered_and_granted_to_the_dot_only() {
+    fn the_drag_mode_command_is_registered_and_granted_to_the_dot_only() {
         let build = include_str!("../build.rs");
         let capabilities: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        for command in ["dot_drag_mode", "drag_dot_by", "end_dot_drag"] {
-            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
-            let permission = format!("allow-{}", command.replace('_', "-"));
-            let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == permission.as_str()))
-                .flat_map(|c| c["windows"].as_array().unwrap())
-                .collect();
-            assert_eq!(windows, ["dot"], "{permission}");
-        }
+        assert!(build.contains("\"dot_drag_mode\","), "dot_drag_mode is missing from build.rs");
+        let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == "allow-dot-drag-mode"))
+            .flat_map(|c| c["windows"].as_array().unwrap())
+            .collect();
+        assert_eq!(windows, ["dot"]);
     }
 
     #[test]

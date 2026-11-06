@@ -10,11 +10,10 @@ import {
 	connectionInfo,
 	connectorCommand,
 	dotDragsByLayer,
-	dragDotBy,
-	endDotDrag,
 	hidePanel,
 	inDesktop,
 	onDesktopEvent,
+	onDotDragStarted,
 	setDotState,
 	startDragging,
 	togglePanel,
@@ -177,6 +176,7 @@ function Assistant({ surface }: { surface: Surface }) {
 
 	// Where the Dot is a layer surface (S9) the app cannot start a window drag; it asks first.
 	const [layerDrag, setLayerDrag] = useState(false);
+	const dragByApp = useMemo(() => (layerDrag ? { onStart: onDotDragStarted } : undefined), [layerDrag]);
 	useEffect(() => {
 		if (surface !== "dot" || !inDesktop()) return;
 		let live = true;
@@ -203,7 +203,7 @@ function Assistant({ surface }: { surface: Surface }) {
 				yolo={yolo !== undefined}
 				toggle={togglePanel}
 				startDrag={() => void startDragging()}
-				layerDrag={layerDrag ? { by: dragDotBy, end: endDotDrag } : undefined}
+				layerDrag={dragByApp}
 			/>
 		);
 	}

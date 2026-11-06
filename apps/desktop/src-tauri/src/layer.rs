@@ -7,10 +7,13 @@
 //!
 //! GTK calls: the main thread only. Every window is initialized once, before its first show.
 
-use crate::geometry::{self, Rect};
+use crate::geometry::{self, DotDrag, DragStep, Rect};
 use gtk::gdk;
+use gtk::glib::Propagation;
 use gtk::prelude::*;
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 pub const NAMESPACE: &str = "gentle-dot";
 
@@ -115,4 +118,125 @@ pub fn fill_output(window: &gtk::ApplicationWindow, output: usize) -> Result<(),
 pub fn restore_corner(window: &gtk::ApplicationWindow) {
     window.set_exclusive_zone(IGNORE_OTHER_ZONES);
     anchor_top_left(window);
+}
+
+/// What the pointer does to the Dot once a press on it becomes a drag.
+pub enum DotEvent {
+    /// Put the Dot at `to`; `started` on the first step of the drag.
+    Moved(DragStep),
+    /// The button went up after a drag.
+    Dropped,
+}
+
+/// The web view inside `widget`, if any.
+fn find_web_view(widget: &gtk::Widget) -> Option<gtk::Widget> {
+    if widget.type_().name() == "WebKitWebView" {
+        return Some(widget.clone());
+    }
+    widget.downcast_ref::<gtk::Container>()?.children().iter().find_map(find_web_view)
+}
+
+/// Whether this is the first widget to report the event: the web view and the window both see a
+/// press that propagates up, with the same time stamp. Events without a time stamp always count.
+fn first_report(seen: &Cell<Option<(gdk::EventType, u32)>>, kind: gdk::EventType, time: u32) -> bool {
+    if time != 0 && seen.get() == Some((kind, time)) {
+        return false;
+    }
+    seen.set(Some((kind, time)));
+    true
+}
+
+fn pointer_seat() -> Option<gdk::Seat> {
+    gdk::Display::default()?.default_seat()
+}
+
+/// Keeps every pointer event of the drag coming to this client. The press gives an implicit grab
+/// on the web view's own GdkWindow, and that one stops getting motion once the pointer leaves the
+/// surface (the release still arrives), so the Dot would move only as far as its own square (L39,
+/// T15c). An explicit grab with `owner_events` sends the motion outside the surface to the window
+/// and leaves the events inside it to the web view.
+fn grab_pointer(widget: &gtk::Widget) {
+    let (Some(seat), Some(window)) = (pointer_seat(), widget.toplevel().and_then(|top| top.window())) else {
+        return;
+    };
+    let status = seat.grab(&window, gdk::SeatCapabilities::POINTER, true, None, None, None);
+    if status != gdk::GrabStatus::Success {
+        eprintln!("gentle-dot: cannot grab the pointer for the drag: {status:?}");
+    }
+}
+
+fn release_pointer() {
+    if let Some(seat) = pointer_seat() {
+        seat.ungrab();
+    }
+}
+
+/// Follows the pointer for the Dot's whole drag from GTK, with an explicit pointer grab from the
+/// moment the press becomes a drag (see `grab_pointer`). `dot` is where the Dot is now. The
+/// handlers run before the widgets' own, never stop an event, and so leave the click to the web
+/// view. Call before the window is realized.
+pub fn watch_dot_drag(
+    window: &gtk::ApplicationWindow,
+    dot: impl Fn() -> (i32, i32) + 'static,
+    on: impl Fn(DotEvent) + 'static,
+) {
+    let drag = Rc::new(RefCell::new(DotDrag::default()));
+    let seen = Rc::new(Cell::new(None));
+    let (dot, on) = (Rc::new(dot), Rc::new(on));
+    let view = find_web_view(window.upcast_ref());
+    let mut widgets: Vec<gtk::Widget> = vec![window.clone().upcast()];
+    widgets.extend(view.clone());
+    let primary = |button: u32| button == 1;
+    for widget in widgets {
+        widget.add_events(gdk::EventMask::BUTTON_PRESS_MASK | gdk::EventMask::BUTTON_RELEASE_MASK | gdk::EventMask::POINTER_MOTION_MASK);
+        widget.connect_button_press_event({
+            let (drag, seen) = (drag.clone(), seen.clone());
+            move |_, event| {
+                let kind = event.event_type();
+                if primary(event.button()) && kind == gdk::EventType::ButtonPress && first_report(&seen, kind, event.time()) {
+                    drag.borrow_mut().press(event.position());
+                }
+                Propagation::Proceed
+            }
+        });
+        widget.connect_motion_notify_event({
+            let (drag, seen, dot, on) = (drag.clone(), seen.clone(), dot.clone(), on.clone());
+            move |widget, event| {
+                if !first_report(&seen, event.event_type(), event.time()) {
+                    return Propagation::Proceed;
+                }
+                if !event.state().contains(gdk::ModifierType::BUTTON1_MASK) {
+                    // The release went elsewhere: the press is over.
+                    if drag.borrow_mut().release() {
+                        release_pointer();
+                        on(DotEvent::Dropped);
+                    }
+                    return Propagation::Proceed;
+                }
+                let step = drag.borrow_mut().motion(event.position(), dot());
+                if let Some(step) = step {
+                    if step.started {
+                        grab_pointer(widget.upcast_ref());
+                    }
+                    on(DotEvent::Moved(step));
+                }
+                Propagation::Proceed
+            }
+        });
+        widget.connect_button_release_event({
+            let (drag, seen, on, view) = (drag.clone(), seen.clone(), on.clone(), view.clone());
+            move |widget, event| {
+                if primary(event.button()) && first_report(&seen, event.event_type(), event.time()) && drag.borrow_mut().release() {
+                    release_pointer();
+                    // Under the grab the window gets the release and the web view never does: it
+                    // would keep the button down and swallow the next click. Hand it over.
+                    if let Some(view) = view.as_ref().filter(|view| *view != widget) {
+                        view.event(event);
+                    }
+                    on(DotEvent::Dropped);
+                }
+                Propagation::Proceed
+            }
+        });
+    }
 }

@@ -176,6 +176,74 @@ pub fn restore_rect(before: Rect, monitors: &[Rect], margin: i32) -> Rect {
     }
 }
 
+/// The largest drag offset a layer Dot takes, in points: wider than any monitor layout.
+#[cfg(any(target_os = "linux", test))]
+const DRAG_OFFSET_MAX: f64 = 100_000.0;
+/// How far the pointer moves with the button down before a press on the layer Dot is a drag and
+/// not a click, in points.
+#[cfg(any(target_os = "linux", test))]
+pub const DRAG_THRESHOLD: f64 = 3.0;
+
+/// Where a layer Dot dragged from `start` goes for the pointer's movement since the press, or
+/// `None` for an offset that is not a number. COSMIC reports the pointer relative to where the
+/// surface was when the button went down for the whole drag (L34), so the offset counts from the
+/// drag's start, never from where the Dot is now.
+#[cfg(any(target_os = "linux", test))]
+pub fn dragged_dot(start: (i32, i32), dx: f64, dy: f64) -> Option<(i32, i32)> {
+    if !dx.is_finite() || !dy.is_finite() {
+        return None;
+    }
+    // `as` saturates, and the sum saturates too: a wild offset stops at the edge of the range.
+    let offset = |value: f64| value.clamp(-DRAG_OFFSET_MAX, DRAG_OFFSET_MAX).round() as i32;
+    Some((start.0.saturating_add(offset(dx)), start.1.saturating_add(offset(dy))))
+}
+
+/// One step of a drag that is under way: where the Dot goes, and whether this is the first step.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragStep {
+    pub to: (i32, i32),
+    pub started: bool,
+}
+
+/// The press, motion, and release of the pointer on the layer Dot, seen by GTK (which keeps
+/// getting motion outside the Dot during a press; the web view does not, L39). Pure: it decides
+/// when a press becomes a drag and where the Dot goes, and the caller moves it.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Default)]
+pub struct DotDrag {
+    /// Where the button went down, in the Dot's coordinates.
+    press: Option<(f64, f64)>,
+    /// Where the Dot was when the press became a drag; `None` while it is still a click.
+    start: Option<(i32, i32)>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl DotDrag {
+    /// The primary button went down. A press that never saw its release is forgotten.
+    pub fn press(&mut self, at: (f64, f64)) {
+        *self = Self { press: Some(at), start: None };
+    }
+
+    /// The pointer moved at `at` with the button down; `dot` is where the Dot is now. Returns where
+    /// to put the Dot once the movement is a drag.
+    pub fn motion(&mut self, at: (f64, f64), dot: (i32, i32)) -> Option<DragStep> {
+        let press = self.press?;
+        let (dx, dy) = (at.0 - press.0, at.1 - press.1);
+        let started = self.start.is_none();
+        if started && dx.hypot(dy) <= DRAG_THRESHOLD {
+            return None;
+        }
+        let to = dragged_dot(*self.start.get_or_insert(dot), dx, dy)?;
+        Some(DragStep { to, started })
+    }
+
+    /// The button went up: whether the press had become a drag (and so is not a click).
+    pub fn release(&mut self) -> bool {
+        std::mem::take(self).start.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +423,56 @@ mod tests {
         assert_eq!(place_panel(dot(1932, -188), (420, 640), offset, 8, 12), (1996, -188));
         // A panel larger than the monitor keeps its top-left corner visible.
         assert_eq!(place_panel(dot(12, 100), (420, 640), Rect::new(0, 0, 400, 600), 8, 12), (12, 12));
+    }
+
+    #[test]
+    fn a_layer_drag_counts_the_offset_from_where_the_dot_started() {
+        // (start, dx, dy, expected)
+        let cases = [
+            ((1836, 166), 0.0, 0.0, Some((1836, 166))),
+            ((1836, 166), -936.4, 374.6, Some((900, 541))),
+            // The same offset twice lands on the same spot: nothing accumulates.
+            ((1836, 166), -936.4, 374.6, Some((900, 541))),
+            // A huge offset is bounded, never wraps.
+            ((i32::MAX - 10, 0), 1e12, 0.0, Some((i32::MAX, 0))),
+            ((0, 0), f64::NAN, 0.0, None),
+            ((0, 0), 0.0, f64::INFINITY, None),
+        ];
+        for (start, dx, dy, expected) in cases {
+            assert_eq!(dragged_dot(start, dx, dy), expected, "{start:?} {dx} {dy}");
+        }
+    }
+
+    #[test]
+    fn a_press_on_the_layer_dot_is_a_click_until_it_moves_past_the_threshold() {
+        let step = |to, started| Some(DragStep { to, started });
+        let mut drag = DotDrag::default();
+        // Motion without a press does nothing.
+        assert_eq!(drag.motion((50.0, 50.0), (1836, 166)), None);
+        drag.press((36.0, 36.0));
+        // Inside the threshold it is still a click, and its release is not a drag.
+        assert_eq!(drag.motion((38.0, 37.0), (1836, 166)), None);
+        assert!(!drag.release());
+        // Past it, the drag starts from where the Dot was; the offset counts from the press, and
+        // keeps counting from the start while the Dot (and its coordinates) move.
+        drag.press((36.0, 36.0));
+        assert_eq!(drag.motion((30.0, 20.0), (1836, 166)), step((1830, 150), true));
+        assert_eq!(drag.motion((-900.0, 500.0), (1830, 150)), step((900, 630), false));
+        // Back inside the threshold does not turn it into a click again.
+        assert_eq!(drag.motion((36.0, 36.0), (900, 630)), step((1836, 166), false));
+        assert!(drag.release());
+        // The drag is over: nothing carries into the next press, and a stray release is no drag.
+        assert_eq!(drag.motion((90.0, 90.0), (1836, 166)), None);
+        assert!(!drag.release());
+    }
+
+    #[test]
+    fn a_layer_press_whose_release_was_lost_does_not_leak_into_the_next() {
+        let mut drag = DotDrag::default();
+        drag.press((10.0, 10.0));
+        assert!(drag.motion((40.0, 10.0), (100, 100)).is_some());
+        // No release came; the next press starts clean, from the Dot's position then.
+        drag.press((5.0, 5.0));
+        assert_eq!(drag.motion((15.0, 5.0), (400, 300)), Some(DragStep { to: (410, 300), started: true }));
     }
 }

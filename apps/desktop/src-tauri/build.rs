@@ -11,8 +11,6 @@ const COMMANDS: &[&str] = &[
     "set_rose_hidden",
     "set_panel_fullscreen",
     "dot_drag_mode",
-    "drag_dot_by",
-    "end_dot_drag",
     "computer_endpoint",
     "computer_permissions",
     "computer_request_permission",

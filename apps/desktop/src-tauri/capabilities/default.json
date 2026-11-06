@@ -27,9 +27,9 @@
 		},
 		{
 			"identifier": "layer-dot",
-			"description": "How the Dot is dragged where it is a layer surface (Wayland, S9): the Dot asks whether to, then reports its own pointer movement; the panel never moves the Dot.",
+			"description": "How the Dot is dragged where it is a layer surface (Wayland, S9): the Dot asks whether the app follows the pointer itself, so its click does not fire after a drag; the panel never asks.",
 			"windows": ["dot"],
-			"permissions": ["allow-dot-drag-mode", "allow-drag-dot-by", "allow-end-dot-drag"]
+			"permissions": ["allow-dot-drag-mode"]
 		},
 		{
 			"identifier": "voice",

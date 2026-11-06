@@ -14,16 +14,6 @@ function setup(agentState: AgentState = "idle", connected = true) {
 	return { toggle, startDrag, dot: screen.getByRole("button") };
 }
 
-/** Animation frames that run only when the test says so. */
-function manualFrames() {
-	const queue: FrameRequestCallback[] = [];
-	vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => queue.push(callback));
-	vi.stubGlobal("cancelAnimationFrame", () => queue.splice(0));
-	return () => {
-		for (const callback of queue.splice(0)) callback(0);
-	};
-}
-
 describe("DotSurface", () => {
 	afterEach(() => vi.unstubAllGlobals());
 
@@ -48,8 +38,15 @@ describe("DotSurface", () => {
 		function layerSetup() {
 			const toggle = vi.fn();
 			const startDrag = vi.fn();
-			const layerDrag = { by: vi.fn(() => Promise.resolve()), end: vi.fn() };
-			render(
+			let started = () => {};
+			const stop = vi.fn();
+			const layerDrag = {
+				onStart: vi.fn((listener: () => void) => {
+					started = listener;
+					return stop;
+				}),
+			};
+			const view = render(
 				<DotSurface
 					agentState="idle"
 					connected
@@ -58,37 +55,55 @@ describe("DotSurface", () => {
 					layerDrag={layerDrag}
 				/>,
 			);
-			const dot = screen.getByRole("button");
-			const capture = vi.fn();
-			Object.assign(dot, { setPointerCapture: capture });
-			return { toggle, startDrag, layerDrag, capture, dot };
+			return {
+				toggle,
+				startDrag,
+				stop,
+				view,
+				appStartsDrag: () => started(),
+				dot: screen.getByRole("button"),
+			};
 		}
 
-		it("captures the pointer and sends the offset since the press once per frame", () => {
-			const runFrame = manualFrames();
-			const { toggle, startDrag, layerDrag, capture, dot } = layerSetup();
-			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0, pointerId: 4 });
-			fireEvent.pointerMove(dot, { clientX: 20, clientY: 18, button: 0, pointerId: 4 });
-			fireEvent.pointerMove(dot, { clientX: 25, clientY: 14, button: 0, pointerId: 4 });
-			expect(capture).toHaveBeenCalledWith(4);
-			expect(layerDrag.by).not.toHaveBeenCalled();
-			runFrame();
-			expect(layerDrag.by).toHaveBeenCalledTimes(1);
-			expect(layerDrag.by).toHaveBeenCalledWith(15, 4);
-			fireEvent.pointerUp(dot, { clientX: 25, clientY: 14, button: 0, pointerId: 4 });
-			expect(layerDrag.end).toHaveBeenCalledTimes(1);
+		it("leaves the drag to the app and does not open the panel at the end of one", () => {
+			const { toggle, startDrag, dot } = layerSetup();
+			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
+			fireEvent.pointerMove(dot, { clientX: 20, clientY: 18, button: 0 });
+			fireEvent.pointerUp(dot, { clientX: 20, clientY: 18, button: 0 });
 			expect(startDrag).not.toHaveBeenCalled();
 			expect(toggle).not.toHaveBeenCalled();
 		});
 
-		it("still opens the panel on a click", () => {
-			const { toggle, layerDrag, dot } = layerSetup();
+		it("does not open the panel when the app starts the drag before the pointer moves here", () => {
+			const { toggle, appStartsDrag, dot } = layerSetup();
+			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
+			appStartsDrag();
+			fireEvent.pointerUp(dot, { clientX: 10, clientY: 10, button: 0 });
+			expect(toggle).not.toHaveBeenCalled();
+			// The next press is a click again.
+			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
+			fireEvent.pointerUp(dot, { clientX: 10, clientY: 10, button: 0 });
+			expect(toggle).toHaveBeenCalledTimes(1);
+		});
+
+		it("still opens the panel on a click, and stops listening when it goes away", () => {
+			const { toggle, stop, view, dot } = layerSetup();
 			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
 			fireEvent.pointerMove(dot, { clientX: 12, clientY: 11, button: 0 });
 			fireEvent.pointerUp(dot, { clientX: 12, clientY: 11, button: 0 });
 			expect(toggle).toHaveBeenCalledTimes(1);
-			expect(layerDrag.by).not.toHaveBeenCalled();
-			expect(layerDrag.end).not.toHaveBeenCalled();
+			view.unmount();
+			expect(stop).toHaveBeenCalledTimes(1);
+		});
+
+		it("forgets a drag whose release never arrived", () => {
+			const { toggle, dot } = layerSetup();
+			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
+			fireEvent.pointerMove(dot, { clientX: 30, clientY: 10, button: 0 });
+			// The release went to another window; the next press is a fresh click.
+			fireEvent.pointerDown(dot, { clientX: 10, clientY: 10, button: 0 });
+			fireEvent.pointerUp(dot, { clientX: 10, clientY: 10, button: 0 });
+			expect(toggle).toHaveBeenCalledTimes(1);
 		});
 	});
 
