@@ -17,6 +17,8 @@ export interface ComputerPermissions {
 	screenshotsSupported?: boolean;
 	/** The app registered the panic shortcut at launch, so it can stop computer control. */
 	panicShortcut?: boolean;
+	/** Linux only: the session is Wayland (false on X11); an older app and other systems send none. */
+	wayland?: boolean;
 	/** Why screenshots are unsupported, only when they are; an older app sends none. */
 	screenshotsUnsupported?: "tooOld" | "unknownVersion";
 }

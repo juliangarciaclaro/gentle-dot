@@ -24,6 +24,7 @@ pub const MAX_SPARE: usize = 16;
 const REMAP_SETTLE: Duration = Duration::from_millis(30);
 /// Wait for the pointer to arrive before a button or the wheel acts.
 const ARRIVE: Duration = Duration::from_millis(30);
+/// Wait between the press and the release of a click, and between the clicks of a double click.
 const CLICK_GAP: Duration = Duration::from_millis(30);
 /// Wait between the motion events of a drag, which apps need to see the item move.
 const DRAG_GAP: Duration = Duration::from_millis(20);
@@ -38,8 +39,7 @@ pub fn cardinals(bytes: &[u8]) -> Vec<u32> {
 
 /// The app id from `WM_CLASS` (`instance\0Class\0`): the class, else the instance, else empty.
 pub fn app_id(wm_class: &[u8]) -> String {
-    let mut fields = wm_class.split(|&b| b == 0).filter(|field| !field.is_empty());
-    let instance = fields.next();
+    let instance = wm_class.split(|&b| b == 0).find(|field| !field.is_empty());
     // `instance\0\0` has no class; the second field is the class when there is one.
     let class = wm_class.split(|&b| b == 0).nth(1).filter(|field| !field.is_empty());
     class.or(instance).map(|field| String::from_utf8_lossy(field).into_owned()).unwrap_or_default()
@@ -119,6 +119,57 @@ pub fn topmost_at<'a>(stacked: &'a [WindowInfo], outputs: &[OutputInfo], at: Poi
         .iter()
         .rev()
         .find(|w| !w.minimized && toplevels::global_rects(w, outputs).iter().any(|rect| toplevels::contains(rect, at)))
+}
+
+/// One child of the root window as `QueryTree` lists it (bottom to top), before it is judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootChild {
+    pub id: u32,
+    pub rect: Rect,
+    pub override_redirect: bool,
+    pub viewable: bool,
+    /// An `InputOnly` window draws nothing.
+    pub input_only: bool,
+    /// Gentle Dot's own (its overlay is click-through).
+    pub own: bool,
+}
+
+/// The mapped override-redirect windows (menus, tooltips) with their place among the root's
+/// children, as windows with no app: the window manager does not list them, and nobody can
+/// name their owner, so a point they hold fails closed (an empty app id is the unidentified app).
+/// A window covering the whole root (a desktop, the compositor overlay) is not a popup.
+pub fn popups(children: &[RootChild], root: Rect, outputs: &[OutputInfo]) -> Vec<(usize, WindowInfo)> {
+    let covers_root = |r: &Rect| r.x <= root.x && r.y <= root.y && r.width >= root.width && r.height >= root.height;
+    children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.override_redirect && c.viewable && !c.input_only && !c.own && !covers_root(&c.rect))
+        .map(|(index, c)| {
+            let anonymous = RawWindow {
+                id: c.id,
+                wm_class: Vec::new(),
+                title: String::new(),
+                pid: None,
+                hidden: false,
+                viewable: true,
+                rect: c.rect,
+                extents: None,
+            };
+            (index, window_info(&anonymous, None, outputs, 0))
+        })
+        .collect()
+}
+
+/// The managed windows (bottom to top, each with its frame's place among the root's children)
+/// with the popups put where the server stacks them: before the first window whose frame is
+/// above them. A window whose frame is unknown is taken to be below every popup.
+pub fn stack_with_popups(managed: Vec<(WindowInfo, Option<usize>)>, popups: Vec<(usize, WindowInfo)>) -> Vec<WindowInfo> {
+    let mut stacked = managed;
+    for (index, popup) in popups {
+        let at = stacked.iter().position(|(_, frame)| frame.is_some_and(|frame| frame > index)).unwrap_or(stacked.len());
+        stacked.insert(at, (popup, Some(index)));
+    }
+    stacked.into_iter().map(|(window, _)| window).collect()
 }
 
 /// The server's keyboard map: `per` keysyms for each keycode from `first`.
@@ -507,6 +558,43 @@ mod tests {
         // Nothing there: fail closed.
         assert_eq!(topmost_at(&stacked, &outs, at(2000.0, 100.0)), None);
         assert_eq!(topmost_at(&[], &outs, at(1.0, 1.0)), None);
+    }
+
+    #[test]
+    fn a_popup_above_a_window_is_an_owner_nobody_can_name() {
+        let outs = outputs();
+        let root = rect(0, 0, 3840, 1080);
+        let child = |id, r| RootChild { id, rect: r, override_redirect: true, viewable: true, input_only: false, own: false };
+        let managed = |id, class: &str, r, frame| (window_info(&raw(id, class, r), None, &outs, 4242), frame);
+        // Bottom to top, as `QueryTree` lists the root's children.
+        let children = [
+            child(100, root),                           // 0: desktop or compositor overlay, covers the root
+            RootChild { override_redirect: false, ..child(101, rect(0, 0, 1000, 1000)) }, // 1: the frame of window 1 (managed)
+            child(102, rect(450, 450, 200, 200)),       // 2: a menu above window 1, below window 2
+            RootChild { override_redirect: false, ..child(103, rect(500, 500, 1000, 500)) }, // 3: the frame of window 2 (managed)
+            child(104, rect(600, 600, 50, 50)),         // 4: a tooltip above both
+            RootChild { viewable: false, ..child(105, rect(0, 0, 3000, 1000)) },
+            RootChild { input_only: true, ..child(106, rect(0, 0, 3000, 1000)) },
+            RootChild { own: true, ..child(107, rect(0, 0, 3000, 1000)) },
+            RootChild { override_redirect: false, ..child(108, rect(0, 0, 3000, 1000)) },
+        ];
+        let found = popups(&children, root, &outs);
+        assert_eq!(found.iter().map(|(index, w)| (*index, w.id)).collect::<Vec<_>>(), [(2, 102), (4, 104)]);
+        assert!(found.iter().all(|(_, w)| w.app_id.is_empty() && !w.minimized));
+        let owner = |managed: Vec<_>, x, y| {
+            let stacked = stack_with_popups(managed, found.clone());
+            topmost_at(&stacked, &outs, at(x, y)).map(|w| (w.id, w.app_id.clone()))
+        };
+        let both = || vec![managed(1, "Firefox", rect(0, 0, 1000, 1000), Some(1)), managed(2, "Files", rect(500, 500, 1000, 500), Some(3))];
+        // A point only the menu (and window 1 below it) holds: the menu, not the window below.
+        assert_eq!(owner(both(), 460.0, 460.0), Some((102, String::new())));
+        // Window 2 is above the menu: it owns what both hold.
+        assert_eq!(owner(both(), 640.0, 640.0).map(|o| o.0), Some(104));
+        assert_eq!(owner(both(), 520.0, 520.0), Some((2, "Files".into())));
+        assert_eq!(owner(both(), 100.0, 100.0), Some((1, "Firefox".into())));
+        // A window whose frame is unknown cannot be shown to cover the popup: the popup wins.
+        let unknown = vec![managed(2, "Files", rect(0, 0, 1000, 1000), None)];
+        assert_eq!(owner(unknown, 460.0, 460.0), Some((102, String::new())));
     }
 
     /// A map with letters on the first level, a shifted symbol, and free keycodes at the top.

@@ -141,7 +141,7 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					})}
 				</ul>
 			)}
-			{linux ? <p className="connector-note">{LINUX_WAYLAND_NOTE}</p> : null}
+			{linux && granted?.wayland ? <p className="connector-note">{LINUX_WAYLAND_NOTE}</p> : null}
 			{windows ? null : (
 				<div className="provider-actions">
 					<button type="button" onClick={check}>

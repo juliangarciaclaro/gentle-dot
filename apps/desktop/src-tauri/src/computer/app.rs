@@ -698,17 +698,25 @@ pub fn computer_permissions(computer: State<'_, Computer>) -> PermissionsAnswer 
         let _ = computer;
         Permissions { accessibility: false, screen_recording: false, screenshots_supported: false, screenshots_unsupported: None }
     };
-    PermissionsAnswer { permissions, panic_shortcut: panic_shortcut_registered() }
+    // The backend is the Wayland client whenever `WAYLAND_DISPLAY` is set, XWayland or not.
+    #[cfg(target_os = "linux")]
+    let wayland = Some(super::linux::session::detect(|key| std::env::var(key).ok()) == super::linux::session::Session::Wayland);
+    #[cfg(not(target_os = "linux"))]
+    let wayland = None;
+    PermissionsAnswer { permissions, panic_shortcut: panic_shortcut_registered(), wayland }
 }
 
 /// The `computer_permissions` answer: the permissions, plus `panicShortcut`, so Connectors names
-/// the panic shortcut only when it works.
+/// the panic shortcut only when it works, and on Linux `wayland`, so it explains the Wayland
+/// pointer opt-in only on a Wayland session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionsAnswer {
     #[serde(flatten)]
     pub permissions: Permissions,
     pub panic_shortcut: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wayland: Option<bool>,
 }
 
 #[cfg(target_os = "linux")]
@@ -981,11 +989,16 @@ Use Stop in the panel or the tray menu instead."
     #[test]
     fn the_permissions_answer_says_whether_the_panic_shortcut_is_registered() {
         let permissions = Permissions { accessibility: true, screen_recording: false, screenshots_supported: true, screenshots_unsupported: None };
-        let value = serde_json::to_value(PermissionsAnswer { permissions, panic_shortcut: false }).unwrap();
+        let value = serde_json::to_value(PermissionsAnswer { permissions, panic_shortcut: false, wayland: None }).unwrap();
         assert_eq!(
             value,
             serde_json::json!({"accessibility": true, "screenRecording": false, "screenshotsSupported": true, "panicShortcut": false})
         );
+        // Only Linux says which kind of session it is.
+        for wayland in [true, false] {
+            let value = serde_json::to_value(PermissionsAnswer { permissions, panic_shortcut: false, wayland: Some(wayland) }).unwrap();
+            assert_eq!(value["wayland"], serde_json::json!(wayland));
+        }
         set_panic_shortcut_registered(true);
         assert!(panic_shortcut_registered());
         set_panic_shortcut_registered(false);

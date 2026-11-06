@@ -443,6 +443,7 @@ describe("on Linux (S6)", () => {
 	afterEach(() => vi.restoreAllMocks());
 
 	it("names the Linux permissions, the Wayland note and Alt+Shift+Esc, and never says Mac", async () => {
+		h.permissions.wayland = true;
 		// The daemon's own wording for the entry is not under test here.
 		h.state = connectorsOpen([computerEntry({ sends: "Click, type, and open apps on this computer." })]);
 		await renderApp("?surface=panel");
@@ -458,6 +459,19 @@ describe("on Linux (S6)", () => {
 		expect(entry.textContent).not.toMatch(/Mac|⌥/);
 		await userEvent.click(within(input).getByRole("button", { name: "Grant Keyboard and pointer" }));
 		expect(h.invoke).toHaveBeenCalledWith("computer_request_permission", { kind: "accessibility" });
+	});
+
+	it("shows the Wayland note only when the session is Wayland", async () => {
+		h.state = connectorsOpen([computerEntry({ sends: "Click, type, and open apps on this computer." })]);
+		// An X11 session, and an app that does not say, never see the Wayland note.
+		for (const wayland of [false, undefined]) {
+			h.permissions.wayland = wayland;
+			const { unmount } = await renderApp("?surface=panel");
+			const entry = await screen.findByRole("listitem", { name: "Computer" });
+			await within(entry).findByRole("listitem", { name: "Keyboard and pointer" });
+			expect(within(entry).queryByText(LINUX_WAYLAND_NOTE)).toBeNull();
+			unmount();
+		}
 	});
 
 	it("names the computer in the session banner", async () => {

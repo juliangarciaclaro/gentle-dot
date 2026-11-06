@@ -3,15 +3,16 @@
 //! decided; the decisions are tested there.
 
 use super::toplevels::{OutputInfo, WindowInfo};
-use super::x11::{self, KeyAction, Mapping, PixelFormat, PointerAction, RawWindow};
+use super::x11::{self, KeyAction, Mapping, PixelFormat, PointerAction, RawWindow, RootChild};
 use super::pointer::Rect;
 use crate::computer::coords::Point;
 use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    self, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, ImageFormat, ImageOrder, MapState, Window,
+    self, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, ImageFormat, ImageOrder, MapState, Window, WindowClass,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
@@ -37,8 +38,9 @@ pub struct X11 {
     root: Window,
     atoms: Atoms,
     xtest: bool,
-    /// The window manager keeps `_NET_CLIENT_LIST_STACKING`.
-    ewmh: bool,
+    /// The window manager keeps `_NET_CLIENT_LIST_STACKING`; asked again while it was not there
+    /// (one that starts late or restarts).
+    ewmh: AtomicBool,
     /// One input sequence at a time: keys and buttons of two calls never interleave.
     input: Mutex<()>,
     own_pid: u32,
@@ -67,9 +69,19 @@ impl X11 {
             frame_extents: atom(b"_NET_FRAME_EXTENTS")?,
         };
         let xtest = conn.extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME).ok().flatten().is_some();
-        let mut x11 = X11 { conn, root, atoms, xtest, ewmh: false, input: Mutex::new(()), own_pid: std::process::id() };
-        x11.ewmh = x11.property(x11.root, x11.atoms.client_list_stacking, AtomEnum::WINDOW.into()).is_ok_and(|p| p.is_some());
+        let x11 = X11 { conn, root, atoms, xtest, ewmh: AtomicBool::new(false), input: Mutex::new(()), own_pid: std::process::id() };
+        x11.has_ewmh();
         Ok(x11)
+    }
+
+    /// Whether the window manager keeps the stacking list; probed again until it does.
+    fn has_ewmh(&self) -> bool {
+        if self.ewmh.load(Ordering::Relaxed) {
+            return true;
+        }
+        let found = self.property(self.root, self.atoms.client_list_stacking, AtomEnum::WINDOW.into()).is_ok_and(|p| p.is_some());
+        self.ewmh.store(found, Ordering::Relaxed);
+        found
     }
 
     /// XTest is there: keys and the pointer can be sent.
@@ -79,7 +91,7 @@ impl X11 {
 
     /// The window manager tells which windows exist and which is in front.
     pub fn can_list_windows(&self) -> bool {
-        self.ewmh
+        self.has_ewmh()
     }
 
     fn property(&self, window: Window, property: u32, kind: u32) -> Result<Option<Vec<u8>>, String> {
@@ -97,26 +109,85 @@ impl X11 {
     }
 
     /// The outputs (RandR CRTCs; the root when RandR knows none) and the managed windows, bottom
-    /// to top, as the window manager has them now. A window manager without EWMH lists none, so
-    /// no app is ever in front or under a point.
+    /// to top, as the window manager has them now, with the override-redirect popups among them
+    /// as windows with no app. A window manager without EWMH lists none, so no app is ever in
+    /// front or under a point.
     pub fn snapshot(&self) -> Result<(Vec<OutputInfo>, Vec<WindowInfo>), String> {
         let outputs = self.outputs()?;
-        if !self.ewmh {
+        if !self.has_ewmh() {
             return Ok((outputs, Vec::new()));
         }
         let active = self.cardinals(self.root, self.atoms.active_window, AtomEnum::WINDOW).and_then(|ids| ids.first().copied());
         let ids = self.cardinals(self.root, self.atoms.client_list_stacking, AtomEnum::WINDOW).unwrap_or_default();
-        let windows = ids
+        let children = self.root_children();
+        let managed = ids
             .into_iter()
-            .filter_map(|id| self.raw_window(id))
-            .map(|raw| x11::window_info(&raw, active.filter(|&id| id != 0), &outputs, self.own_pid))
+            .filter_map(|id| {
+                let raw = self.raw_window(id)?;
+                let frame = self.frame_of(id).and_then(|frame| children.iter().position(|c| c.id == frame));
+                Some((x11::window_info(&raw, active.filter(|&id| id != 0), &outputs, self.own_pid), frame))
+            })
             .collect();
-        Ok((outputs, windows))
+        let popups = x11::popups(&children, self.root_rect()?, &outputs);
+        Ok((outputs, x11::stack_with_popups(managed, popups)))
+    }
+
+    /// The top-level ancestor of a client: the window manager's frame, or the client itself.
+    fn frame_of(&self, mut id: Window) -> Option<Window> {
+        loop {
+            let parent = self.conn.query_tree(id).ok()?.reply().ok()?.parent;
+            if parent == self.root || parent == 0 {
+                return Some(id);
+            }
+            id = parent;
+        }
+    }
+
+    /// The children of the root window, bottom to top; those that cannot be read are left out.
+    fn root_children(&self) -> Vec<RootChild> {
+        let Some(ids) = self.conn.query_tree(self.root).ok().and_then(|c| c.reply().ok()).map(|tree| tree.children) else {
+            return Vec::new();
+        };
+        ids.into_iter()
+            .map(|id| {
+                let read = || -> Option<RootChild> {
+                    let attributes = self.conn.get_window_attributes(id).ok()?.reply().ok()?;
+                    let geometry = self.conn.get_geometry(id).ok()?.reply().ok()?;
+                    let pid = self.cardinals(id, self.atoms.wm_pid, AtomEnum::CARDINAL).and_then(|v| v.first().copied());
+                    Some(RootChild {
+                        id,
+                        rect: Rect {
+                            x: i32::from(geometry.x),
+                            y: i32::from(geometry.y),
+                            width: i32::from(geometry.width),
+                            height: i32::from(geometry.height),
+                        },
+                        override_redirect: attributes.override_redirect,
+                        viewable: attributes.map_state == MapState::VIEWABLE,
+                        input_only: attributes.class == WindowClass::INPUT_ONLY,
+                        own: pid == Some(self.own_pid),
+                    })
+                };
+                // One that cannot be read went away; it keeps its place in the order, as no popup.
+                read().unwrap_or(RootChild {
+                    id,
+                    rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+                    override_redirect: false,
+                    viewable: false,
+                    input_only: false,
+                    own: false,
+                })
+            })
+            .collect()
+    }
+
+    fn root_rect(&self) -> Result<Rect, String> {
+        let geometry = self.conn.get_geometry(self.root).map_err(failed)?.reply().map_err(failed)?;
+        Ok(Rect { x: 0, y: 0, width: i32::from(geometry.width), height: i32::from(geometry.height) })
     }
 
     fn outputs(&self) -> Result<Vec<OutputInfo>, String> {
-        let root_geometry = self.conn.get_geometry(self.root).map_err(failed)?.reply().map_err(failed)?;
-        let root = Rect { x: 0, y: 0, width: i32::from(root_geometry.width), height: i32::from(root_geometry.height) };
+        let root = self.root_rect()?;
         let crtcs = (|| -> Result<Vec<x11::Crtc>, String> {
             let resources = self.conn.randr_get_screen_resources_current(self.root).map_err(failed)?.reply().map_err(failed)?;
             resources
