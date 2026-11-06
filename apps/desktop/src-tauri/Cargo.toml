@@ -68,6 +68,10 @@ core-foundation = "0.10"
 dbus-secret-service = "4.1"
 # The approval dialog (S5): a GTK dialog on the main thread, the `gtk` that tauri and tao already link.
 gtk = "0.18"
+# The Dot and the panel as layer surfaces on compositors without app-placed windows (COSMIC, S9):
+# always on top, placed by margins on their output. Links the system libgtk-layer-shell; `v0_6`
+# is the version that has `set_keyboard_mode` (the panel takes keys on demand, the Dot never).
+gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
 # Computer control (S2): our own Wayland client for COSMIC (outputs, toplevels, activation, the
 # virtual keyboard), and the screenshot portal over D-Bus (`zbus` blocking, already in the lock).
 wayland-client = "0.31"

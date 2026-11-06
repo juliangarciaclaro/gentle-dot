@@ -20,7 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		build-essential ca-certificates curl file git pkg-config wget xz-utils \
-		libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+		libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libgtk-layer-shell-dev \
 		lsof procps xauth xvfb \
 	&& rm -rf /var/lib/apt/lists/*
 

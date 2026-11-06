@@ -27,6 +27,7 @@ SYSTEM_PACKAGES=(
 	appmenu-gtk-module
 	libayatana-appindicator
 	librsvg
+	gtk-layer-shell
 	xdotool
 	git
 	xz

@@ -22,6 +22,7 @@ SYSTEM_PACKAGES=(
 	libssl-dev
 	libayatana-appindicator3-dev
 	librsvg2-dev
+	libgtk-layer-shell-dev
 	git
 	xz-utils
 	ca-certificates
