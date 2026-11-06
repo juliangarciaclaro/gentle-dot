@@ -54,8 +54,15 @@ fn anchor_top_left(window: &gtk::ApplicationWindow) {
     }
 }
 
-/// Makes the window a layer surface in `layer`. Must run before the window is realized.
-fn init(window: &gtk::ApplicationWindow, layer: Layer, keyboard: KeyboardMode) {
+/// Makes the window a layer surface in `layer`, `size` logical points. Must run before the window
+/// is realized.
+///
+/// The size request pins the window's requested size to `size`. Without it a WebKitWebView child
+/// changes the request after the first show; GtkWindow then asks for a resize, freezes the
+/// toplevel's updates until the matching `configure-event`, and a layer surface never sends one,
+/// so the window never paints (T15b). It is a minimum: the full-screen panel still grows.
+fn init(window: &gtk::ApplicationWindow, size: (i32, i32), layer: Layer, keyboard: KeyboardMode) {
+    window.set_size_request(size.0, size.1);
     window.init_layer_shell();
     window.set_namespace(NAMESPACE);
     window.set_layer(layer);
@@ -65,13 +72,13 @@ fn init(window: &gtk::ApplicationWindow, layer: Layer, keyboard: KeyboardMode) {
 }
 
 /// The Dot: above everything, on every workspace, never takes the keyboard.
-pub fn init_dot(window: &gtk::ApplicationWindow) {
-    init(window, Layer::Overlay, KeyboardMode::None);
+pub fn init_dot(window: &gtk::ApplicationWindow, size: (i32, i32)) {
+    init(window, size, Layer::Overlay, KeyboardMode::None);
 }
 
 /// The panel: above the windows, and it takes keys when the user clicks into it.
-pub fn init_panel(window: &gtk::ApplicationWindow) {
-    init(window, Layer::Top, KeyboardMode::OnDemand);
+pub fn init_panel(window: &gtk::ApplicationWindow, size: (i32, i32)) {
+    init(window, size, Layer::Top, KeyboardMode::OnDemand);
 }
 
 /// Puts the window's top-left corner at the global `rect` corner: on the output it is mostly on,

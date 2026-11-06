@@ -887,11 +887,11 @@ fn build_layer_windows(
     rose_hidden: bool,
 ) -> tauri::Result<()> {
     let (dot_window, panel_window) = (dot.gtk_window()?, panel.gtk_window()?);
-    crate::layer::init_dot(&dot_window);
-    crate::layer::init_panel(&panel_window);
+    let size = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
+    crate::layer::init_dot(&dot_window, size);
+    crate::layer::init_panel(&panel_window, (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32));
     let outputs = crate::layer::outputs();
     let saved = position::load(&desktop_file(config)).map(|p| (p.x, p.y));
-    let size = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
     let start = geometry::initial_dot_position(saved, size, &outputs, crate::layer::primary_output(), EDGE_MARGIN)
         .unwrap_or((EDGE_MARGIN, EDGE_MARGIN));
     if let Some(layer) = &app.state::<Shell>().layer {
