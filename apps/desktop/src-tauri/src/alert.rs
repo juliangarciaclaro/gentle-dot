@@ -190,7 +190,6 @@ mod macos {
         }
         let (answer, answered) = std::sync::mpsc::channel();
         let (title, message) = (title.to_owned(), message.to_owned());
-        let handle = app.clone();
         let scheduled = app.run_on_main_thread(move || {
             let response = MainThreadMarker::new().map(|mtm| run(mtm, &title, &message, choice));
             let _ = answer.send(response);

@@ -41,12 +41,16 @@ pub struct WindowInfo {
     pub frames: Vec<(u32, Rect)>,
 }
 
-/// Whether a window with these workspaces is on one the user is looking at (`active`). Without
-/// workspace information (the compositor offers none, or none is active yet) or for a window that
-/// reports no workspace, it counts as visible: that is the answer without this rule, and the
+/// Whether a window with these workspaces is on one the user is looking at (`active`). A window
+/// counts as hidden only when every workspace it reports is one the compositor announced
+/// (`known`) and none of them is active. Without workspace information (the compositor offers
+/// none, or none is active yet), for a window that reports no workspace, or for one on a
+/// workspace never announced, it counts as visible: that is the answer without this rule, and the
 /// other guards still apply.
-pub fn on_active_workspace<T: PartialEq>(workspaces: &[T], active: &[T]) -> bool {
-    active.is_empty() || workspaces.is_empty() || workspaces.iter().any(|workspace| active.contains(workspace))
+pub fn on_active_workspace<T: PartialEq>(workspaces: &[T], known: &[T], active: &[T]) -> bool {
+    active.is_empty()
+        || workspaces.is_empty()
+        || workspaces.iter().any(|workspace| active.contains(workspace) || !known.contains(workspace))
 }
 
 pub(super) fn contains(rect: &Rect, at: Point) -> bool {
@@ -331,19 +335,24 @@ mod tests {
 
     #[test]
     fn a_window_counts_as_visible_unless_every_workspace_it_is_on_is_hidden() {
-        // (workspaces the window is on, active workspaces, visible)
-        let cases: [(&[u32], &[u32], bool); 7] = [
-            (&[1], &[2], false),
-            (&[2], &[2], true),
-            (&[1, 2], &[2], true),
-            (&[1, 3], &[2], false),
+        // (workspaces the window is on, workspaces known, active workspaces, visible)
+        let all: &[u32] = &[1, 2, 3];
+        type Case<'a> = (&'a [u32], &'a [u32], &'a [u32], bool);
+        let cases: [Case; 9] = [
+            (&[1], all, &[2], false),
+            (&[2], all, &[2], true),
+            (&[1, 2], all, &[2], true),
+            (&[1, 3], all, &[2], false),
+            // A workspace the manager never announced may be showing: fail closed, visible.
+            (&[99], &[1, 2], &[2], true),
+            (&[1, 99], &[1, 2], &[2], true),
             // No workspace information, or none about the window: as before.
-            (&[1], &[], true),
-            (&[], &[2], true),
-            (&[], &[], true),
+            (&[1], all, &[], true),
+            (&[], all, &[2], true),
+            (&[], &[], &[], true),
         ];
-        for (workspaces, active, visible) in cases {
-            assert_eq!(on_active_workspace(workspaces, active), visible, "{workspaces:?} vs {active:?}");
+        for (workspaces, known, active, visible) in cases {
+            assert_eq!(on_active_workspace(workspaces, known, active), visible, "{workspaces:?} of {known:?} vs {active:?}");
         }
     }
 
@@ -353,7 +362,7 @@ mod tests {
         // workspaces 1 and 3 whose geometry still covers it.
         let active_workspaces = [2u32];
         let on = |workspace: u32, mut w: WindowInfo| {
-            w.minimized = !on_active_workspace(&[workspace], &active_workspaces);
+            w.minimized = !on_active_workspace(&[workspace], &[1, 2, 3], &active_workspaces);
             w
         };
         let frame = [(1, rect(0, 0, 1000, 1000))];

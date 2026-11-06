@@ -194,6 +194,7 @@ impl State {
         } else {
             Vec::new()
         };
+        let known: Vec<ObjectId> = self.workspaces.iter().map(|w| w.wl.id()).collect();
         let windows = self
             .toplevels
             .iter()
@@ -202,7 +203,7 @@ impl State {
                 app_id: t.app_id.clone(),
                 title: t.title.clone(),
                 activated: t.activated,
-                minimized: t.minimized || !on_active_workspace(&t.workspaces, &active),
+                minimized: t.minimized || !on_active_workspace(&t.workspaces, &known, &active),
                 frames: t
                     .frames
                     .iter()
