@@ -692,7 +692,7 @@ fn drag_dot_by(app: AppHandle, dx: f64, dy: f64) -> CommandResult {
     // One frame never moves it further than a screen.
     let step = |value: f64| value.clamp(-DRAG_STEP_MAX, DRAG_STEP_MAX).round() as i32;
     let (x, y) = *layer.dot.lock().unwrap();
-    let next = (x + step(dx), y + step(dy));
+    let next = (x.saturating_add(step(dx)), y.saturating_add(step(dy)));
     layer_place(&app, DOT, dot_rect_at(next))?;
     *layer.dot.lock().unwrap() = next;
     Ok(())
