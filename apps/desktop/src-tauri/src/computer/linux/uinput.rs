@@ -89,7 +89,15 @@ fn step_frame(step: &Step) -> Frame {
             Frame { device: Device::Relative, events: vec![(EV_REL, REL_X, dx), (EV_REL, REL_Y, dy)] }
         }
         Step::Absolute { x, y } => {
-            Frame { device: Device::Absolute, events: vec![(EV_ABS, ABS_X, fraction(x)), (EV_ABS, ABS_Y, fraction(y))] }
+            // The kernel drops an absolute value equal to the device's last one, so a repeated
+            // target would leave the pointer where the pushes took it. A neighbouring value first,
+            // in the same frame, makes the target always arrive without a visible move (L72).
+            let (x, y) = (fraction(x), fraction(y));
+            let near = |value: i32| if value > 0 { value - 1 } else { value + 1 };
+            Frame {
+                device: Device::Absolute,
+                events: vec![(EV_ABS, ABS_X, near(x)), (EV_ABS, ABS_Y, near(y)), (EV_ABS, ABS_X, x), (EV_ABS, ABS_Y, y)],
+            }
         }
     }
 }
@@ -487,8 +495,12 @@ mod tests {
         // Absolute x/y are 0..=65535 fractions of the output under the pointer.
         let last = frames[82];
         assert_eq!(last.device, Device::Absolute);
-        assert_eq!(last.events[0], (3, 0, (150.0_f64 / 1919.0 * 65535.0).round() as i32));
-        assert_eq!(last.events[1], (3, 1, (300.0_f64 / 1079.0 * 65535.0).round() as i32));
+        // Each axis first gets a neighbouring value: the kernel drops an absolute value equal to
+        // the device's last one, which left a repeated target in the corner the pushes reach.
+        let (x, y) = ((150.0_f64 / 1919.0 * 65535.0).round() as i32, (300.0_f64 / 1079.0 * 65535.0).round() as i32);
+        assert_eq!(last.events, [(3, 0, x - 1), (3, 1, y - 1), (3, 0, x), (3, 1, y)]);
+        let corner = step_frame(&Step::Absolute { x: 0.0, y: 0.0 });
+        assert_eq!(corner.events, [(3, 0, 1), (3, 1, 1), (3, 0, 0), (3, 1, 0)]);
         // The compositor reads each device on its own, so switching device waits a moment.
         assert!(actions.contains(&Action::Pause(SETTLE)));
         for pair in actions.windows(2) {
