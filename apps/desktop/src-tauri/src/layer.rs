@@ -80,9 +80,37 @@ pub fn init_dot(window: &gtk::ApplicationWindow, size: (i32, i32)) {
     init(window, size, Layer::Overlay, KeyboardMode::None);
 }
 
-/// The panel: above the windows, and it takes keys when the user clicks into it.
+/// The panel: above the windows, and it takes keys when the user clicks into it. One that
+/// `hold_keyboard` held back takes them again as the pointer comes onto it.
 pub fn init_panel(window: &gtk::ApplicationWindow, size: (i32, i32)) {
     init(window, size, Layer::Top, KeyboardMode::OnDemand);
+    let mut widgets: Vec<gtk::Widget> = vec![window.clone().upcast()];
+    widgets.extend(find_web_view(window.upcast_ref()));
+    for widget in widgets {
+        widget.add_events(gdk::EventMask::ENTER_NOTIFY_MASK);
+        let window = window.clone();
+        widget.connect_enter_notify_event(move |_, _| {
+            take_keyboard(&window);
+            Propagation::Proceed
+        });
+    }
+}
+
+/// Call before showing a layer window that takes keys on demand without focusing it (T15i):
+/// COSMIC focuses such a surface as it maps, which takes the focus from the app computer control
+/// is working in and closes the menu it just opened; `set_focus_on_map` does nothing for a layer
+/// surface. The window takes no keys until `take_keyboard`.
+pub fn hold_keyboard(window: &gtk::ApplicationWindow) {
+    if window.is_layer_window() && window.keyboard_mode() == KeyboardMode::OnDemand {
+        window.set_keyboard_mode(KeyboardMode::None);
+    }
+}
+
+/// Lets the panel take keys again after `hold_keyboard`. Only for the panel: the Dot never does.
+pub fn take_keyboard(window: &gtk::ApplicationWindow) {
+    if window.is_layer_window() && window.keyboard_mode() == KeyboardMode::None {
+        window.set_keyboard_mode(KeyboardMode::OnDemand);
+    }
 }
 
 /// The computer-control glow (T15h): above everything, filling its output, and it never takes

@@ -741,6 +741,11 @@ fn show_panel(app: &AppHandle) -> CommandResult {
     restore_panel(&window(app, PANEL)?)?;
     place_panel(app)?;
     let panel = window(app, PANEL)?;
+    // Computer control may have shown it without the keyboard; opened, it takes keys (T15i).
+    #[cfg(target_os = "linux")]
+    if app.state::<Shell>().layer.is_some() {
+        crate::layer::take_keyboard(&panel.gtk_window().map_err(err)?);
+    }
     panel.show().map_err(err)?;
     #[cfg(windows)]
     computer::set_shown(&panel, true)?;

@@ -159,11 +159,13 @@ pub fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
 }
 
 /// GTK asks the window manager not to focus the window as it is mapped, then restores the
-/// default so the panel shortcut still focuses the panel. Main thread only.
+/// default so the panel shortcut still focuses the panel. A layer surface takes no keys until the
+/// pointer comes onto it or the panel is opened (`layer::hold_keyboard`). Main thread only.
 #[cfg(target_os = "linux")]
 pub fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
     use gtk::prelude::GtkWindowExt;
     let gtk = window.gtk_window().map_err(|e| e.to_string())?;
+    crate::layer::hold_keyboard(&gtk);
     gtk.set_focus_on_map(false);
     let shown = window.show().map_err(|e| e.to_string());
     gtk.set_focus_on_map(true);
