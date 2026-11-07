@@ -221,7 +221,7 @@ Turn on **Launch at login** in the tray menu, log out, and log back in.
 
 Open **Connectors**, connect one that signs in with your account (for example Notion), and finish the sign-in. Then open **Passwords and Keys** (Seahorse; on KDE, KWalletManager) and look in the **Login** keyring.
 
-**Expected:** an item whose name starts with "Gentle Dot connector: connector/". Then ask the assistant to do something that sends, for example "create a Notion page called Gentle Dot test". A Gentle Dot dialog (not a card in the chat) asks "Allow Notion to …?" with the full action, and **Decline** is the default button. Choose **Decline**: nothing is created.
+**Expected:** an item whose name starts with "Gentle Dot connector: connector/". Built-in connectors only read (their row says "It cannot send or change anything"): ask the assistant "create a Notion page called Gentle Dot test" and it says it cannot, and nothing is created. A connector that sends is a custom one set to **Read and send**; ask it for something that sends, and a Gentle Dot dialog (not a card in the chat) asks "Allow … to …?" with the full action, and **Decline** is the default button. Choose **Decline**: nothing is sent. A connector connected while the assistant runs shows up for it after **Restart assistant** in the tray.
 
 The keyring keeps these items encrypted on disk, but while it is unlocked any program running as you can read them (see docs/install.md, Linux). If your session has no keyring, the connector does not run and `~/.gentle-dot/daemon.log` says `no Secret Service in this desktop session`; note that in the report.
 
