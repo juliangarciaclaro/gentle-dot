@@ -141,7 +141,8 @@ gnome-extensions enable ubuntu-appindicators@ubuntu.com
 
 **Expected:**
 - A small rose appears in the top bar (GNOME) or in Waybar (Omarchy). It is light gray with a dark outline, and readable on both light and dark bars.
-- Clicking it opens a menu: Open, Open in browser, Hide the rose, Restart assistant, Launch at login, Quit.
+- Clicking it opens a menu: Open, Open in browser, Hide the rose, Stop computer control, Yolo mode, Restart assistant, Launch at login, Quit.
+- **Yolo mode** is unchecked at launch. Choosing it asks for a confirmation first, and the check follows the switch in **Connectors → Computer**. **Stop computer control** ends a control session (step 18).
 - **Open** shows the panel. **Open in browser** opens the same chat in your browser. **Hide the rose** hides the rose, and the item then reads **Show the rose**.
 - Hovering over the icon may show "Gentle Dot — Ready". Many Linux panels do not show tray tooltips, so this is not a failure.
 - While the assistant answers (step 11), the icon's outer petals turn dashed. When it waits for your answer, an amber dot appears on the icon.

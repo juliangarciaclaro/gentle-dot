@@ -928,8 +928,11 @@ fn conversations_on(value: Option<&str>) -> bool {
 
 /// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
 /// conversations list on; in the single continuous chat there is nothing new to start.
-/// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
+/// "Stop computer control" and "Yolo mode" exist where computer control does (S24.3, S24.9).
 /// "rose" hides or shows the floating Dot (S26.1).
+/// Whether this build has computer control, and so its tray items.
+const TRAY_COMPUTER_CONTROL: bool = cfg!(any(target_os = "macos", windows, target_os = "linux"));
+
 fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
     let mut ids = vec!["open"];
     if conversations {
@@ -951,7 +954,7 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
     app.manage(OpenMenuItem(open.clone()));
     let menu = Menu::new(app)?;
     let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
-    for id in tray_menu_ids(conversations, cfg!(any(target_os = "macos", windows))) {
+    for id in tray_menu_ids(conversations, TRAY_COMPUTER_CONTROL) {
         match id {
             "open" => menu.append(&open)?,
             "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
@@ -1300,6 +1303,13 @@ mod tests {
             tray_menu_ids(false, true),
             vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
         );
+    }
+
+    #[test]
+    fn every_desktop_build_offers_stop_and_yolo_in_the_tray() {
+        // Linux has computer control too; its tray lacked both items (T15s).
+        let ids = tray_menu_ids(false, TRAY_COMPUTER_CONTROL);
+        assert!(ids.contains(&"computer-stop") && ids.contains(&"computer-yolo"), "{ids:?}");
     }
 
     #[test]
