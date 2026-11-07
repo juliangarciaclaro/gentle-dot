@@ -1288,11 +1288,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build Gentle Dot")
         .run(|app, event| {
-            if let RunEvent::Exit = event {
+            // A first launch with `--panic` exits before the shell is set up, with nothing to stop.
+            if let (RunEvent::Exit, Some(shell)) = (&event, app.try_state::<Shell>()) {
                 #[cfg(unix)]
-                app.state::<Shell>().daemon.stop();
+                shell.daemon.stop();
                 #[cfg(windows)]
-                if let Err(reason) = app.state::<Shell>().daemon.stop() {
+                if let Err(reason) = shell.daemon.stop() {
                     eprintln!("gentle-dot: Windows shutdown was not confirmed: {reason}");
                 }
             }

@@ -7,8 +7,10 @@
 
 -- Installed from the package (.deb or Arch package): /usr/bin/gentle-dot.
 local toggle = "/usr/bin/gentle-dot --toggle"
+local panic = "/usr/bin/gentle-dot --panic"
 -- Built from source with scripts/linux/setup-*.sh: use this line instead of the one above.
 -- local toggle = (os.getenv("HOME") or "") .. "/.local/bin/gentle-dot --toggle"
+-- local panic = (os.getenv("HOME") or "") .. "/.local/bin/gentle-dot --panic"
 
 -- The rose: a 72 px transparent window with no border, shadow, or blur.
 hl.window_rule({
@@ -40,10 +42,12 @@ hl.window_rule({
   opacity = "1 override 1 override",
 })
 
--- SUPER + ALT + D toggles the panel. Omarchy's o.bind also lists it in its keybindings menu.
+-- SUPER + ALT + D toggles the panel; ALT + SHIFT + ESCAPE ends computer control. Omarchy's o.bind also lists it in its keybindings menu.
 local omarchy = rawget(_G, "o")
 if omarchy and omarchy.bind then
   omarchy.bind("SUPER + ALT + D", "Gentle Dot", toggle)
+  omarchy.bind("ALT + SHIFT + ESCAPE", "Gentle Dot: stop computer control", panic)
 else
   hl.bind("SUPER + ALT + D", hl.dsp.exec_cmd(toggle))
+  hl.bind("ALT + SHIFT + ESCAPE", hl.dsp.exec_cmd(panic))
 end
