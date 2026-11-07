@@ -225,6 +225,22 @@ describe("attaching files in the composer", () => {
 		expect(chips()).toHaveLength(1);
 	});
 
+	it("leaves a middle-click paste of the selected text to the web view (Linux primary selection)", async () => {
+		const pasteImage = vi.fn(async (): Promise<File | undefined> => file("pasted.png", 20, "image/png"));
+		render(<ComposerWith upload={instantUploader()} send={vi.fn()} pasteImage={pasteImage} />);
+		const box = screen.getByRole("textbox", { name: "Message" });
+		fireEvent.mouseDown(box, { button: 1 });
+		expect(fireEvent.paste(box, { clipboardData: { files: [], types: [] } })).toBe(true);
+		fireEvent.mouseDown(box, { button: 1 });
+		const image = { files: [file("image.png", 10, "image/png")], types: ["Files"] };
+		expect(fireEvent.paste(box, { clipboardData: image })).toBe(true);
+		expect(pasteImage).not.toHaveBeenCalled();
+		expect(screen.queryByRole("list", { name: "Files to send" })).toBeNull();
+		// The next paste from the keyboard is an ordinary one again.
+		fireEvent.paste(box, { clipboardData: { files: [], types: [] } });
+		await waitFor(() => expect(chips()).toHaveLength(1));
+	});
+
 	it("has no attach button without an uploader, and a plain send is unchanged", async () => {
 		const send = vi.fn();
 		render(<Composer busy={false} disabled={false} send={send} />);

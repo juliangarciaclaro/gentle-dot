@@ -1,4 +1,4 @@
-import { type ClipboardEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type ClipboardEvent, type KeyboardEvent, type MouseEvent, useEffect, useRef, useState } from "react";
 import { formatSize } from "../uploads.ts";
 import type { AttachmentControls, PendingFile } from "../useAttachments.ts";
 import type { VoiceControls } from "../useVoice.ts";
@@ -38,6 +38,8 @@ export function Composer({
 	/** The last message could not go out; its text and files stay for another try (#21). */
 	const [refused, setRefused] = useState(false);
 	const box = useRef<HTMLTextAreaElement>(null);
+	/** When the middle button last went down in the box: its paste is the selected text (Linux). */
+	const middlePress = useRef(0);
 	const recording = voice?.phase === "recording";
 	const voiceStatus = voice?.phase === "transcribing" ? "Transcribing…" : voice?.note;
 
@@ -82,8 +84,15 @@ export function Composer({
 	}
 
 	/** A pasted image becomes an attachment; pasted text stays text. */
+	function onMouseDown(event: MouseEvent<HTMLTextAreaElement>) {
+		if (event.button === 1) middlePress.current = Date.now();
+	}
+
 	function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-		if (!attachments) return;
+		// A middle click pastes the primary selection; the web view inserts it, whatever the clipboard holds.
+		const middle = Date.now() - middlePress.current < 1000;
+		middlePress.current = 0;
+		if (!attachments || middle) return;
 		const images = Array.from(event.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
 		if (images.length > 0) {
 			event.preventDefault();
@@ -202,6 +211,7 @@ export function Composer({
 						}}
 						onKeyDown={onKeyDown}
 						onPaste={onPaste}
+						onMouseDown={onMouseDown}
 					/>
 				)}
 				{busy || voice?.speaking ? (
