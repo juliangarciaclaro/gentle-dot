@@ -1153,6 +1153,7 @@ pub fn run() {
             shortcut_get,
             shortcut_set,
             connector_command,
+            crate::clipboard::clipboard_image,
             computer::computer_endpoint,
             computer::computer_permissions,
             computer::computer_request_permission,
@@ -1360,11 +1361,11 @@ mod tests {
     }
 
     #[test]
-    fn the_shortcut_and_connector_commands_are_registered_and_granted_to_the_panel_only() {
+    fn the_shortcut_connector_and_clipboard_commands_are_registered_and_granted_to_the_panel_only() {
         let build = include_str!("../build.rs");
         let capabilities: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        for command in ["shortcut_get", "shortcut_set", "connector_command"] {
+        for command in ["shortcut_get", "shortcut_set", "connector_command", "clipboard_image"] {
             assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
             let permission = format!("allow-{}", command.replace('_', "-"));
             let windows: Vec<&serde_json::Value> = capabilities["capabilities"]

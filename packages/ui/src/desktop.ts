@@ -70,3 +70,14 @@ export async function onDesktopEvent(
 	const { listen } = await import("@tauri-apps/api/event");
 	return listen(name, handler);
 }
+
+/**
+ * The clipboard's image as a PNG file, read by the app; undefined when it holds none. Only the
+ * Linux app reads it: WebKitGTK gives a paste no image data, while the other web views do.
+ */
+export async function clipboardImage(): Promise<File | undefined> {
+	const png = await invoke<string | null>("clipboard_image");
+	if (!png) return undefined;
+	const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0));
+	return new File([bytes], "pasted-image.png", { type: "image/png" });
+}

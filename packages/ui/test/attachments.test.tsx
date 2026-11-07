@@ -34,9 +34,25 @@ function instantUploader() {
 	});
 }
 
-function ComposerWith({ upload, send }: { upload: Uploader; send: Send }) {
+function ComposerWith({
+	upload,
+	send,
+	pasteImage,
+}: {
+	upload: Uploader;
+	send: Send;
+	pasteImage?: () => Promise<File | undefined>;
+}) {
 	const attachments = useAttachments(upload);
-	return <Composer busy={false} disabled={false} send={send} attachments={attachments} />;
+	return (
+		<Composer
+			busy={false}
+			disabled={false}
+			send={send}
+			attachments={attachments}
+			{...(pasteImage ? { pasteImage } : {})}
+		/>
+	);
 }
 
 const attachInput = () => screen.getByLabelText("Attach files") as HTMLInputElement;
@@ -188,6 +204,24 @@ describe("attaching files in the composer", () => {
 		});
 		expect(chips().map((c) => c.textContent)).toEqual([expect.stringContaining("image.png")]);
 		fireEvent.paste(box, { clipboardData: { files: [], types: ["text/plain"] } });
+		expect(chips()).toHaveLength(1);
+	});
+
+	it("asks the app for a pasted image the web view could not read (Flameshot on Linux)", async () => {
+		const shot = file("pasted.png", 20, "image/png");
+		const pasteImage = vi.fn(async (): Promise<File | undefined> => shot);
+		render(<ComposerWith upload={instantUploader()} send={vi.fn()} pasteImage={pasteImage} />);
+		const box = screen.getByRole("textbox", { name: "Message" });
+		fireEvent.paste(box, { clipboardData: { files: [], types: ["text/plain"] } });
+		expect(pasteImage).not.toHaveBeenCalled();
+		fireEvent.paste(box, { clipboardData: { files: [], types: [] } });
+		await waitFor(() =>
+			expect(chips().map((c) => c.textContent)).toEqual([expect.stringContaining("pasted.png")]),
+		);
+		expect(pasteImage).toHaveBeenCalledTimes(1);
+		pasteImage.mockResolvedValueOnce(undefined);
+		fireEvent.paste(box, { clipboardData: { files: [], types: [] } });
+		await waitFor(() => expect(pasteImage).toHaveBeenCalledTimes(2));
 		expect(chips()).toHaveLength(1);
 	});
 

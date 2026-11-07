@@ -17,6 +17,11 @@ interface ComposerProps {
 	voice?: VoiceControls;
 	/** Files for the message (S31.1); without it there is no attach button. */
 	attachments?: AttachmentControls;
+	/**
+	 * The clipboard's image as the app reads it. WebKitGTK hands a paste nothing when the clipboard
+	 * holds only an image (a Flameshot capture), so the composer asks the app instead.
+	 */
+	pasteImage?: () => Promise<File | undefined>;
 }
 
 export function Composer({
@@ -27,6 +32,7 @@ export function Composer({
 	onStartTyping,
 	voice,
 	attachments,
+	pasteImage,
 }: ComposerProps) {
 	const [text, setText] = useState("");
 	/** The last message could not go out; its text and files stay for another try (#21). */
@@ -79,9 +85,20 @@ export function Composer({
 	function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
 		if (!attachments) return;
 		const images = Array.from(event.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
-		if (images.length === 0) return;
+		if (images.length > 0) {
+			event.preventDefault();
+			attachments.add(images);
+			return;
+		}
+		// A paste that carries nothing the web view could read: the clipboard may hold only an image.
+		if (!pasteImage || (event.clipboardData?.types.length ?? 0) > 0) return;
 		event.preventDefault();
-		attachments.add(images);
+		pasteImage().then(
+			(image) => {
+				if (image) attachments.add([image]);
+			},
+			() => {},
+		);
 	}
 
 	function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {

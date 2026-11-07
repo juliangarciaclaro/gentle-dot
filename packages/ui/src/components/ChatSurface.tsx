@@ -1,6 +1,6 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
 import { type DragEvent, useState } from "react";
-import { openUrl as openExternal } from "../desktop.ts";
+import { clipboardImage, inDesktop, openUrl as openExternal } from "../desktop.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
 import type { Uploader } from "../uploads.ts";
 import { useAttachments } from "../useAttachments.ts";
@@ -463,6 +463,7 @@ export function ChatSurface({
 				onStartTyping={closeOptions}
 				voice={voice}
 				{...(attachments ? { attachments } : {})}
+				{...(attachments && inDesktop() ? { pasteImage: clipboardImage } : {})}
 			/>
 		</div>
 	);

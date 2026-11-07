@@ -29,6 +29,7 @@ const COMMANDS: &[&str] = &[
     "shortcut_get",
     "shortcut_set",
     "connector_command",
+    "clipboard_image",
 ];
 
 fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {

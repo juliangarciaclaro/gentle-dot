@@ -59,6 +59,12 @@
 			"permissions": ["allow-connector-command"]
 		},
 		{
+			"identifier": "clipboard",
+			"description": "A pasted image the panel's web view could not read (WebKitGTK, a Flameshot capture): the panel's composer asks the app for the clipboard's image when a paste carries nothing; the Dot never reads the clipboard.",
+			"windows": ["panel"],
+			"permissions": ["allow-clipboard-image"]
+		},
+		{
 			"identifier": "glow",
 			"description": "What the computer-control glow overlay (S28) may call: listening to the glow, working, and session events, and acknowledging that the working rings are on screen; nothing else.",
 			"windows": ["glow"],
