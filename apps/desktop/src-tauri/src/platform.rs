@@ -88,17 +88,21 @@ pub fn uses_layer_shell(os: Os, env: impl Fn(&str) -> Option<String>, layer_shel
     os == Os::Linux && layer_shell_supported && os.compositor_places_windows(&env) && !is_hyprland(&env)
 }
 
-/// What a launch asks for: `--toggle` toggles the panel (bind it to a desktop shortcut);
-/// any other launch shows it.
+/// What a launch asks for: `--toggle` toggles the panel and `--panic` ends computer control (bind
+/// them to desktop shortcuts where the desktop owns them); any other launch shows the panel.
+/// `--panic` wins over `--toggle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchRequest {
     Toggle,
+    Panic,
     Show,
 }
 
 /// Reads the arguments of a launch, `args[0]` being the program.
 pub fn launch_request(args: &[String]) -> LaunchRequest {
-    if args.iter().skip(1).any(|arg| arg == "--toggle") {
+    if args.iter().skip(1).any(|arg| arg == "--panic") {
+        LaunchRequest::Panic
+    } else if args.iter().skip(1).any(|arg| arg == "--toggle") {
         LaunchRequest::Toggle
     } else {
         LaunchRequest::Show
@@ -221,6 +225,16 @@ mod tests {
         // The program path is never read as an argument.
         assert_eq!(launch_request(&args(&["--toggle"])), LaunchRequest::Show);
         assert_eq!(launch_request(&[]), LaunchRequest::Show);
+    }
+
+    #[test]
+    fn panic_argument_ends_computer_control_and_wins_over_toggle() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(launch_request(&args(&["gentle-dot", "--panic"])), LaunchRequest::Panic);
+        assert_eq!(launch_request(&args(&["gentle-dot", "--toggle", "--panic"])), LaunchRequest::Panic);
+        assert_eq!(launch_request(&args(&["gentle-dot", "--panic", "--toggle"])), LaunchRequest::Panic);
+        assert_eq!(launch_request(&args(&["gentle-dot", "panic", "--panicked"])), LaunchRequest::Show);
+        assert_eq!(launch_request(&args(&["--panic"])), LaunchRequest::Show);
     }
 
     #[test]

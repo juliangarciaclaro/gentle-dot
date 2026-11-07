@@ -52,11 +52,13 @@ You can run the script again at any time; it skips what is already done. `script
 | Topic | GNOME (Debian, Ubuntu) | Hyprland (Omarchy) | COSMIC (Pop!_OS) |
 |---|---|---|---|
 | Window placement, always on top, snapping to the edge | Work, because the app runs under XWayland | Done by the window rules you paste in step 3C. Snapping to the edge does not happen. | Work through the layer shell (`zwlr_layer_shell_v1`): the rose is an overlay layer surface, the panel a top layer one, and the app places both by their margins on an output, drags the rose itself, and snaps it |
-| Global shortcut | Add a custom shortcut in GNOME Settings (step 7) | `SUPER + ALT + D`, from the binding you paste in step 3C | Add a custom shortcut in COSMIC Settings that runs `gentle-dot --toggle` |
+| Global shortcut | Add a custom shortcut in GNOME Settings (step 7) | `SUPER + ALT + D`, from the binding you paste in step 3C | Add a custom shortcut in COSMIC Settings that runs `gentle-dot --toggle`, and one on Alt+Shift+Esc that runs `gentle-dot --panic` |
 | Tray icon | Needs the AppIndicator extension. Ubuntu has it on already; Debian needs it enabled (step 6). | Shown by Waybar | Shown by the COSMIC panel |
 | Panel background | Solid dark, with no blur behind it | Same | Same |
 
 `gentle-dot --toggle` shows or hides the panel of the running app. If the app is not running, the command starts it and opens the panel.
+
+`gentle-dot --panic` ends computer control in the running app, as the panic shortcut does; if the app is not running, it does nothing. On native Wayland (COSMIC, Hyprland) the desktop owns shortcuts, so Gentle Dot does not register Alt+Shift+Esc itself: bind it to `gentle-dot --panic` in the desktop's keyboard settings (on Hyprland, a `bind` line that runs it).
 
 ## The checklist
 
@@ -236,7 +238,7 @@ Then check each of these and note any that fail:
 3. **Pointer:** ask it to drag a file on the desktop and to scroll a long web page, on each monitor if you have several. The pointer lands where it should, the drag ends where it should, and the page scrolls in the direction asked.
 4. **Risky actions:** in an email or chat app, write a message and ask the assistant to click Send. A Gentle Dot dialog asks before the click, with the refusing answer as the default. Choose to refuse: nothing is sent.
 5. **Stale approval (needs step 17's connector):** ask for a connector action that sends and leave its Gentle Dot dialog open for more than two minutes without answering. The dialog goes away by itself, and nothing is sent.
-6. **Panic shortcut:** start a task that takes a while and press Alt+Shift+Esc, once with a Gentle Dot window focused and once with another app focused. Note which ones end the session (on COSMIC it may only work while an X11 app is focused).
+6. **Panic shortcut:** start a task that takes a while and press Alt+Shift+Esc, once with a Gentle Dot window focused and once with another app focused. Each ends the session, and the panel's banner goes away. On COSMIC and Hyprland this needs the `gentle-dot --panic` binding from the table above; running `gentle-dot --panic` in a terminal ends the session too.
 7. **Turn it off:** quit Gentle Dot, set `"full_control": false` in `~/.gentle-dot/desktop.json`, open it again, and ask for a click: the assistant says full desktop control is off.
 
 ## Reporting Wayland limitations

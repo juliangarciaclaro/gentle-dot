@@ -1079,7 +1079,9 @@ fn restart_daemon(app: AppHandle) {
 }
 
 /// The panic shortcut (⌥⇧Esc on macOS, Alt+Shift+Esc on Windows and Linux) ends computer control
-/// from anywhere, even while another app is in front. When another app or the system already holds
+/// from anywhere, even while another app is in front. On native Wayland the desktop owns shortcuts
+/// and it is not registered (reported as unavailable, so no text promises it): the user binds
+/// `gentle-dot --panic` to it. When another app or the system already holds
 /// it, the user is told once and the yolo dialog stops promising it; Stop keeps working.
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 fn register_panic_shortcut(app: &AppHandle) {
@@ -1117,10 +1119,22 @@ fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
     None
 }
 
+/// `gentle-dot --panic`: the panic shortcut where the desktop owns shortcuts (native Wayland).
+fn end_computer_control(app: &AppHandle) {
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    computer::stop(app, Reason::Panic);
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    let _ = app;
+}
+
 /// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
 fn handle_launch(app: &AppHandle, args: &[String]) {
     let result = match platform::launch_request(args) {
         LaunchRequest::Toggle => toggle_panel(app.clone()),
+        LaunchRequest::Panic => {
+            end_computer_control(app);
+            Ok(())
+        }
         LaunchRequest::Show => show_panel(app),
     };
     if let Err(error) = result {
@@ -1177,6 +1191,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
+            // `--panic` with no app running: there is no session to end, so nothing starts.
+            if platform::launch_request(&std::env::args().collect::<Vec<_>>()) == LaunchRequest::Panic {
+                handle.exit(0);
+                return Ok(());
+            }
 
             // Computer control first: a daemon this app spawns gets the helper over its channel.
             let computer = computer::start(&handle, Arc::new(ShellWindows(handle.clone())));
@@ -1228,8 +1247,11 @@ pub fn run() {
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
             app.manage(voice_model);
+            // Where the desktop owns shortcuts, the user binds `gentle-dot --panic` instead.
             #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-            register_panic_shortcut(&handle);
+            if places_windows {
+                register_panic_shortcut(&handle);
+            }
 
             build_windows(&handle, &config, places_windows, rose_hidden)?;
             build_tray(&handle, &config, rose_hidden)?;
@@ -1249,11 +1271,11 @@ pub fn run() {
                 });
             } else if app.state::<Shell>().layer.is_some() {
                 eprintln!(
-                    "gentle-dot: native Wayland with the layer shell: the app places the windows and the desktop owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
+                    "gentle-dot: native Wayland with the layer shell: the app places the windows and the desktop owns shortcuts; bind `gentle-dot --toggle` and `gentle-dot --panic` (docs/linux-testing.md)"
                 );
             } else {
                 eprintln!(
-                    "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
+                    "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` and `gentle-dot --panic` (docs/linux-testing.md)"
                 );
             }
             // Started by the shortcut while not running: open the panel right away.
