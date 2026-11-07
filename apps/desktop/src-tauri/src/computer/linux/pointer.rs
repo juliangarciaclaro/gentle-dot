@@ -35,6 +35,13 @@ const PUSH_STEP: i32 = 400;
 const PUSH_STEPS: usize = 20;
 /// How far past an edge a hop nudges the pointer.
 const NUDGE: i32 = 40;
+/// How far the first motion of a drag goes: past the drag threshold of common toolkits (GTK: 8).
+pub const DRAG_LEAD: f64 = 16.0;
+/// The motions spread over the rest of a drag, after the lead.
+const DRAG_STEPS: usize = 8;
+/// The wait after a drag's first motion: apps start their drag only once they see it, and only
+/// motions after that reach the drop target (L70 of odd/tasks/linux-parity.md).
+pub const DRAG_START: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Rect {
     fn right(&self) -> i32 {
@@ -227,6 +234,24 @@ fn hops(outputs: &[Rect], mut current: usize, goal: usize, target: Point) -> Res
     Ok(steps)
 }
 
+/// The points a drag passes through after the press: a short first motion that makes the app
+/// start its drag, then even steps to `to`. The callers wait `DRAG_START` after the first point.
+/// A drag shorter than the lead goes straight to `to`.
+pub fn drag_path(from: Point, to: Point) -> Vec<Point> {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let distance = dx.hypot(dy);
+    if distance <= DRAG_LEAD {
+        return vec![to];
+    }
+    let along = |d: f64| Point { x: from.x + dx * d / distance, y: from.y + dy * d / distance };
+    let mut path = vec![along(DRAG_LEAD)];
+    path.extend(
+        (1..DRAG_STEPS).map(|i| distance * i as f64 / DRAG_STEPS as f64).filter(|d| *d > DRAG_LEAD).map(along),
+    );
+    path.push(to);
+    path
+}
+
 fn centre(out: Rect) -> Point {
     Point { x: (out.x + out.width / 2) as f64, y: (out.y + out.height / 2) as f64 }
 }
@@ -268,6 +293,21 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn a_drag_leads_past_the_threshold_then_steps_on_to_the_target() {
+        for (from, to) in [(at(100.0, 100.0), at(300.0, 100.0)), (at(500.0, 500.0), at(2500.0, 700.0)), (at(10.0, 10.0), at(50.0, 40.0))] {
+            let path = drag_path(from, to);
+            let distance = |p: Point| (p.x - from.x).hypot(p.y - from.y);
+            assert!((distance(path[0]) - DRAG_LEAD).abs() < 1e-9, "{from:?} -> {to:?}: lead {:?}", path[0]);
+            // Motions keep coming after the lead, each farther along, ending on the target.
+            assert!(path.len() >= 4, "{from:?} -> {to:?}: {path:?}");
+            assert!(path.windows(2).all(|pair| distance(pair[1]) >= distance(pair[0]) + 2.0), "{path:?}");
+            assert_eq!(*path.last().unwrap(), to);
+        }
+        // Shorter than the lead: straight to the target.
+        assert_eq!(drag_path(at(0.0, 0.0), at(5.0, 0.0)), [at(5.0, 0.0)]);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! pauses, using the path planner. `UinputPointer` (Linux only) opens the devices with raw
 //! ioctls and plays the actions. It is opened only after the user turned on full desktop control.
 
-use super::pointer::{plan, plan_from, Rect, Step};
+use super::pointer::{drag_path, plan, plan_from, Rect, Step, DRAG_START};
 use crate::computer::coords::Point;
 use crate::computer::{InputEvent, MouseButton};
 use std::time::Duration;
@@ -154,14 +154,19 @@ pub fn actions(event: &InputEvent, outputs: &[Rect]) -> Result<Vec<Action>, Stri
         }
         InputEvent::Drag { from, to } => {
             let mut actions = steps_actions(&plan(outputs, *from)?, None);
-            // From the known start: no pushes to the corner while the button is held. Halfway
-            // first, so the app sees the item travel, unless the halfway point is in no output.
-            let half = Point { x: (from.x + to.x) / 2.0, y: (from.y + to.y) / 2.0 };
-            let path = plan_from(outputs, *from, half)
-                .and_then(|first| plan_from(outputs, half, *to).map(|second| [first, second].concat()))
-                .or_else(|_| plan_from(outputs, *from, *to))?;
+            // From the known start: no pushes to the corner while the button is held. Along the
+            // drag path, so the app starts its drag and sees the item travel, unless a point of it
+            // is in no output.
+            let mut last = *from;
+            let segments = drag_path(*from, *to)
+                .into_iter()
+                .map(|point| plan_from(outputs, std::mem::replace(&mut last, point), point))
+                .collect::<Result<Vec<_>, _>>()
+                .or_else(|_| plan_from(outputs, *from, *to).map(|direct| vec![direct]))?;
             actions.extend([Action::Pause(ARRIVE), button_frame(MouseButton::Left, true), Action::Pause(DRAG_GAP)]);
-            actions.extend(steps_actions(&path, Some(DRAG_GAP)));
+            for (index, segment) in segments.iter().enumerate() {
+                actions.extend(steps_actions(segment, Some(if index == 0 { DRAG_START } else { DRAG_GAP })));
+            }
             actions.push(button_frame(MouseButton::Left, false));
             Ok(actions)
         }
@@ -519,6 +524,11 @@ mod tests {
         assert!(up > down + 1);
         // While held, no relative push (a push would drag the item to the layout corner).
         assert!(frames[down..up].iter().all(|f| f.events.iter().all(|e| e.0 != 2 || e.2.abs() < 400)));
+        // The first motion starts the app's drag; it waits, then more motions reach the target.
+        let press = actions.iter().position(|a| matches!(a, Action::Frame(f) if f.events.contains(&(1, BTN_LEFT, 1)))).unwrap();
+        let first = press + actions[press + 1..].iter().position(|a| matches!(a, Action::Frame(_))).unwrap() + 1;
+        assert_eq!(actions[first + 1], Action::Pause(DRAG_START));
+        assert!(up - down - 1 >= 4, "motions while held: {}", up - down - 1);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //!
 //! Every answer fails closed like the Wayland ones: a point nobody is known to own has no owner.
 
-use super::pointer::Rect;
+use super::pointer::{drag_path, Rect, DRAG_START};
 use super::toplevels::{self, OutputInfo, WindowInfo};
 use super::{evdev, keymap, uinput};
 use crate::computer::coords::Point;
@@ -326,19 +326,18 @@ pub fn pointer_actions(event: &InputEvent, layout: &[Rect]) -> Result<Vec<Pointe
             Ok(actions)
         }
         InputEvent::Drag { from, to } => {
-            // Halfway first, so the app sees the item travel.
-            let half = Point { x: (from.x + to.x) / 2.0, y: (from.y + to.y) / 2.0 };
-            Ok(vec![
+            // Along the drag path, so the app starts its drag and sees the item travel.
+            let mut actions = vec![
                 go(from)?,
                 PointerAction::Pause(ARRIVE),
                 PointerAction::Button { button: 1, down: true },
                 PointerAction::Pause(DRAG_GAP),
-                go(&half)?,
-                PointerAction::Pause(DRAG_GAP),
-                go(to)?,
-                PointerAction::Pause(DRAG_GAP),
-                PointerAction::Button { button: 1, down: false },
-            ])
+            ];
+            for (index, point) in drag_path(*from, *to).iter().enumerate() {
+                actions.extend([go(point)?, PointerAction::Pause(if index == 0 { DRAG_START } else { DRAG_GAP })]);
+            }
+            actions.push(PointerAction::Button { button: 1, down: false });
+            Ok(actions)
         }
         InputEvent::Scroll { at, dx, dy } => {
             let mut actions = vec![go(at)?];
@@ -714,7 +713,11 @@ mod tests {
 
         let drag = pointer_actions(&InputEvent::Drag { from: at(100.0, 100.0), to: at(300.0, 100.0) }, &layout).unwrap();
         let moves: Vec<_> = drag.iter().filter(|a| matches!(a, PointerAction::Move { .. })).cloned().collect();
-        assert_eq!(moves, [mv(100, 100), mv(200, 100), mv(300, 100)]);
+        let path = [100, 116, 125, 150, 175, 200, 225, 250, 275, 300].map(|x| mv(x, 100));
+        assert_eq!(moves, path);
+        // The first motion starts the app's drag; it waits before the motions that reach the target.
+        let lead = drag.iter().position(|a| *a == mv(116, 100)).unwrap();
+        assert_eq!(drag[lead + 1], PointerAction::Pause(DRAG_START));
         let order: Vec<_> = drag.iter().filter(|a| !matches!(a, PointerAction::Pause(_))).collect();
         assert_eq!(order[1], &button(1, true));
         assert_eq!(order.last(), Some(&&button(1, false)));
