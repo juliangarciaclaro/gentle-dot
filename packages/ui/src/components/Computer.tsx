@@ -52,10 +52,12 @@ interface ComputerBannerProps {
 	session: ComputerSession;
 	yolo: boolean;
 	stop: () => void;
+	/** The current model's name when it does not accept images: the assistant would act without seeing. */
+	blindModel?: string;
 }
 
 /** "Controlling your Mac (PC, computer) · mm:ss left" with a Stop button, while a session is active. */
-export function ComputerBanner({ session, yolo, stop }: ComputerBannerProps) {
+export function ComputerBanner({ session, yolo, stop, blindModel }: ComputerBannerProps) {
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
 		const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -77,6 +79,12 @@ export function ComputerBanner({ session, yolo, stop }: ComputerBannerProps) {
 			<button type="button" className="primary" onClick={stop}>
 				Stop
 			</button>
+			{blindModel ? (
+				<p className="computer-banner-warning" role="alert">
+					{blindModel} does not accept images, so the assistant cannot see your screen. Choose a model that
+					does in the model menu.
+				</p>
+			) : null}
 		</section>
 	);
 }

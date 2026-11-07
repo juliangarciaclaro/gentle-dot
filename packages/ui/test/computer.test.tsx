@@ -262,6 +262,31 @@ describe("while the assistant controls the Mac (S24.6)", () => {
 		expect(screen.queryByRole("region", { name: "Computer control" })).toBeNull();
 	});
 
+	it.each([
+		{ images: false, warned: true },
+		{ images: true, warned: false },
+	])(
+		"warns in the banner when the current model does not accept images ($images)",
+		async ({ images, warned }) => {
+			const current = { provider: "openrouter", id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" };
+			h.state = {
+				...h.state,
+				models: {
+					current,
+					profiles: [],
+					groups: [{ provider: "openrouter", name: "OpenRouter", models: [{ ...current, images }] }],
+				},
+			};
+			h.status = { active: true, endsAt: Date.now() + 60_000 };
+			await renderApp("?surface=panel");
+			const banner = await screen.findByRole("region", { name: "Computer control" });
+			const note = within(banner).queryByText(
+				"DeepSeek V4 Flash does not accept images, so the assistant cannot see your screen. Choose a model that does in the model menu.",
+			);
+			expect(note !== null).toBe(warned);
+		},
+	);
+
 	it("shows a session that was already running when the panel opened, with endsAt in seconds too", async () => {
 		vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
 		vi.setSystemTime(1_800_000_000_000);

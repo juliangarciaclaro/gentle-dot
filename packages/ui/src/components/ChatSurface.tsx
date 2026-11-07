@@ -93,6 +93,12 @@ export function ChatSurface({
 	settings,
 }: ChatSurfaceProps) {
 	const [showSettings, setShowSettings] = useState(false);
+	const current = state.models.current;
+	const blindModel = state.models.groups
+		?.flatMap((group) => group.models)
+		.some((model) => model.provider === current?.provider && model.id === current.id && !model.images)
+		? current?.name
+		: undefined;
 	/** A connector change waiting for the web PIN (S25.8). */
 	const [pinPending, setPinPending] = useState<ClientMessage>();
 	// On a server without the desktop app, connector changes go out with the web PIN instead.
@@ -254,7 +260,12 @@ export function ChatSurface({
 			</header>
 
 			{computer?.session ? (
-				<ComputerBanner session={computer.session} yolo={computer.yolo !== undefined} stop={computer.stop} />
+				<ComputerBanner
+					session={computer.session}
+					yolo={computer.yolo !== undefined}
+					stop={computer.stop}
+					{...(blindModel ? { blindModel } : {})}
+				/>
 			) : null}
 
 			{conversations && showConversations ? (
