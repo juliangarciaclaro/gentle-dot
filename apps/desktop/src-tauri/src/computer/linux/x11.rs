@@ -727,7 +727,8 @@ mod tests {
         let wheel = |actions: Vec<PointerAction>| -> Vec<PointerAction> {
             actions.into_iter().filter(|a| matches!(a, PointerAction::Button { down: true, .. })).collect()
         };
-        assert_eq!(wheel(scroll(0, 80)), [button(5, true), button(5, true)]);
+        assert_eq!(wheel(scroll(0, 400)), [button(5, true), button(5, true), button(5, true)]);
+        assert_eq!(wheel(scroll(0, 80)), [button(5, true)]);
         assert_eq!(wheel(scroll(0, -5)), [button(4, true)]);
         assert_eq!(wheel(scroll(40, 0)), [button(7, true)]);
         assert_eq!(wheel(scroll(-40, 0)), [button(6, true)]);

@@ -74,8 +74,9 @@ const CLICK_GAP: Duration = Duration::from_millis(30);
 const DRAG_GAP: Duration = Duration::from_millis(20);
 /// A double or triple click is the most an app understands.
 pub(super) const MAX_CLICKS: u8 = 3;
-/// One wheel notch is this many pixels of scroll; the wheel is capped so one call cannot spin.
-const PIXELS_PER_NOTCH: u32 = 40;
+/// One wheel notch is about this many pixels of scroll (Firefox 159, GTK by the view's height);
+/// the wheel is capped so one call cannot spin.
+const PIXELS_PER_NOTCH: u32 = 120;
 const MAX_NOTCHES: i32 = 50;
 const HI_RES_PER_NOTCH: i32 = 120;
 
@@ -543,7 +544,7 @@ mod tests {
         let press = actions.iter().position(|a| matches!(a, Action::Frame(f) if f.events.contains(&(1, BTN_LEFT, 1)))).unwrap();
         let first = press + actions[press + 1..].iter().position(|a| matches!(a, Action::Frame(_))).unwrap() + 1;
         assert_eq!(actions[first + 1], Action::Pause(DRAG_START));
-        assert!(up - down - 1 >= 4, "motions while held: {}", up - down - 1);
+        assert!(up - down > 4, "motions while held: {}", up - down - 1);
     }
 
     #[test]
@@ -557,8 +558,9 @@ mod tests {
             assert!(tail.windows(2).all(|pair| !matches!(pair, [Action::Frame(_), Action::Frame(_)])), "notches without a pause");
             tail.iter().filter_map(|a| if let Action::Frame(f) = a { Some(f.events.clone()) } else { None }).collect()
         };
-        let down = actions(&scroll(0, 80), &[HDMI]).unwrap();
-        assert_eq!(wheel(&down), [vec![(2, 0x0b, -120), (2, 8, -1)], vec![(2, 0x0b, -120), (2, 8, -1)]]);
+        // A notch scrolls about 120 px (Firefox 159 px, L77): 400 px is three notches, not ten.
+        let down = actions(&scroll(0, 400), &[HDMI]).unwrap();
+        assert_eq!(wheel(&down), vec![vec![(2, 0x0b, -120), (2, 8, -1)]; 3]);
         let right_up = actions(&scroll(40, -1), &[HDMI]).unwrap();
         assert_eq!(wheel(&right_up), [vec![(2, 0x0c, 120), (2, 6, 1)], vec![(2, 0x0b, 120), (2, 8, 1)]]);
         // A huge value is capped.
