@@ -63,8 +63,8 @@ describe("isBlockedInput", () => {
 describe("memory scope in the identity (S23, L85)", () => {
 	const identity = readFileSync(IDENTITY_SOURCE, "utf8");
 
-	it("saves only to the gentle-dot project", () => {
-		expect(identity).toMatch(/save[^.\n]*`gentle-dot`/i);
+	it("saves only to the gentle-dot-assistant project", () => {
+		expect(identity).toMatch(/save[^.\n]*`gentle-dot-assistant`/i);
 	});
 
 	it("searches the user's whole memory, not only gentle-dot", () => {

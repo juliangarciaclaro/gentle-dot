@@ -246,15 +246,15 @@ describe("isolatedAgentEnv temporary folder", () => {
 });
 
 describe("ensureMemoryProject", () => {
-	it("names the workspace's memory project gentle-dot, replacing any other name", () => {
+	it("names the workspace's memory project gentle-dot-assistant, replacing any other name", () => {
 		const workspace = tempDir();
 		const file = join(workspace, ".engram", "config.json");
 		ensureMemoryProject(workspace);
-		expect(MEMORY_PROJECT).toBe("gentle-dot");
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ project_name: "gentle-dot" });
+		expect(MEMORY_PROJECT).toBe("gentle-dot-assistant");
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ project_name: "gentle-dot-assistant" });
 		writeFileSync(file, '{ "project_name": "other" }');
 		ensureMemoryProject(workspace);
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ project_name: "gentle-dot" });
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ project_name: "gentle-dot-assistant" });
 	});
 });
 
@@ -298,7 +298,7 @@ describe("engine memory and folders", () => {
 		};
 	}
 
-	it("uses the global Engram and the gentle-dot project from the assistant's own workspace", async () => {
+	it("uses the global Engram and the gentle-dot-assistant project from the assistant's own workspace", async () => {
 		const { dataDir, realHome, env, argv, cwd } = await start();
 		const workspace = join(dataDir, "workspace");
 		expect(env.ENGRAM_DATA_DIR).toBe(join(realHome, ".engram"));
@@ -306,7 +306,7 @@ describe("engine memory and folders", () => {
 		expect(env.HOME).toBe(join(dataDir, "home"));
 		expect(cwd).toBe(realpathSync(workspace));
 		expect(JSON.parse(readFileSync(join(workspace, ".engram", "config.json"), "utf8"))).toEqual({
-			project_name: "gentle-dot",
+			project_name: "gentle-dot-assistant",
 		});
 		expect(argv.join("\n")).not.toContain("preferred working folder");
 		// Nothing is written to the user's Engram data by the daemon itself.

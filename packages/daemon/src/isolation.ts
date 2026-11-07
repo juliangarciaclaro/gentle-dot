@@ -101,8 +101,11 @@ export function subagentsEnabled(base: NodeJS.ProcessEnv): boolean {
 	return !(value === "off" || value === "0" || value === "false");
 }
 
-/** The memory project every memory the assistant saves or searches belongs to. */
-export const MEMORY_PROJECT = "gentle-dot";
+/**
+ * The memory project every memory the assistant saves belongs to. Not `gentle-dot`: Engram names a
+ * clone of this app's repository `gentle-dot` from its remote, and the assistant read its developers' notes as its own.
+ */
+export const MEMORY_PROJECT = "gentle-dot-assistant";
 
 /** The memory server port of the private memory (`GENTLE_DOT_ENGRAM=private`). */
 export const PRIVATE_ENGRAM_PORT = "7438";

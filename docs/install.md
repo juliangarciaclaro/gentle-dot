@@ -46,7 +46,7 @@ macOS ties these grants to the app's signature. A DMG signed with a stable ident
 | What | Where |
 |---|---|
 | Settings, conversations, logs (`daemon.log`), the engine's own files | `~/.gentle-dot/` |
-| Memory (Engram, project `gentle-dot`) | `~/.engram/`, shared with any other Engram user on this Mac |
+| Memory (Engram, project `gentle-dot-assistant`) | `~/.engram/`, shared with any other Engram user on this Mac |
 | Launch at login (when turned on) | a LaunchAgent in `~/Library/LaunchAgents/` |
 
 The app itself never changes after install; everything it writes goes to the folders above.
@@ -104,7 +104,7 @@ Open **Gentle Dot** from the Start menu. The first open needs the network once: 
 | Settings, conversations, logs (`daemon.log`), the engine's own files | `%USERPROFILE%\.gentle-dot\` |
 | Connector secrets, encrypted for your Windows user (DPAPI) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` |
 | The window's own data (WebView2) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot\` and `%APPDATA%\dev.gentleman.gentle-dot\` |
-| Memory (Engram, project `gentle-dot`) | `%USERPROFILE%\.engram\`, shared with any other Engram user on this PC |
+| Memory (Engram, project `gentle-dot-assistant`) | `%USERPROFILE%\.engram\`, shared with any other Engram user on this PC |
 | Launch at login (when turned on) | a `Gentle Dot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 
 The app's install folder never changes after install; everything it writes goes to the folders above.

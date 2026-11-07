@@ -174,8 +174,8 @@ describe.skipIf(!enabled)("@real-agent isolation probe", () => {
 			expect(health.agentState).toBe("idle");
 			expect(memory?.instance_id).toBe(globalId);
 			expect(readdirSync(join(dataDir, "home")).includes(".engram")).toBe(false);
-			expect(current).toMatchObject({ project: "gentle-dot", project_source: "config" });
-			expect(observation.project).toBe("gentle-dot");
+			expect(current).toMatchObject({ project: "gentle-dot-assistant", project_source: "config" });
+			expect(observation.project).toBe("gentle-dot-assistant");
 			expect(output()).not.toContain("#token=");
 			expect(after).toBe(before);
 		} finally {
