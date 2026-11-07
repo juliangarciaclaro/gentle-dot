@@ -180,13 +180,16 @@ pub fn actions(event: &InputEvent, outputs: &[Rect]) -> Result<Vec<Action>, Stri
         }
         InputEvent::Scroll { at, dx, dy } => {
             let mut actions = steps_actions(&plan(outputs, *at)?, None);
-            let mut events = Vec::new();
             // Positive `dy` scrolls down and positive `dx` right; the wheel counts up and right.
-            wheel_events(&mut events, REL_HWHEEL_HI_RES, REL_HWHEEL, notches(*dx));
-            wheel_events(&mut events, REL_WHEEL_HI_RES, REL_WHEEL, -notches(*dy));
-            if !events.is_empty() {
-                actions.push(Action::Pause(ARRIVE));
-                actions.push(Action::Frame(Frame { device: Device::Relative, events }));
+            // One frame per notch, as a real wheel sends: apps cap a single large wheel event.
+            for (hi_res, legacy, count) in
+                [(REL_HWHEEL_HI_RES, REL_HWHEEL, notches(*dx)), (REL_WHEEL_HI_RES, REL_WHEEL, -notches(*dy))]
+            {
+                for _ in 0..count.unsigned_abs() {
+                    let mut events = Vec::new();
+                    wheel_events(&mut events, hi_res, legacy, count.signum());
+                    actions.extend([Action::Pause(ARRIVE), Action::Frame(Frame { device: Device::Relative, events })]);
+                }
             }
             Ok(actions)
         }
@@ -546,14 +549,21 @@ mod tests {
     #[test]
     fn a_scroll_moves_then_turns_the_wheel_down_and_right_for_positive_values() {
         let scroll = |dx, dy| InputEvent::Scroll { at: at(100.0, 100.0), dx, dy };
-        let events = |actions: &[Action]| frames(actions).last().unwrap().events.clone();
+        // One frame per notch, as a real wheel sends: apps cap a single large wheel event (Firefox
+        // scrolled 301 px for one frame of ten notches, L74).
+        let wheel = |actions: &[Action]| -> Vec<Vec<Event>> {
+            let after = actions.iter().rposition(|a| matches!(a, Action::Frame(f) if f.device == Device::Absolute)).unwrap();
+            let tail = &actions[after + 1..];
+            assert!(tail.windows(2).all(|pair| !matches!(pair, [Action::Frame(_), Action::Frame(_)])), "notches without a pause");
+            tail.iter().filter_map(|a| if let Action::Frame(f) = a { Some(f.events.clone()) } else { None }).collect()
+        };
         let down = actions(&scroll(0, 80), &[HDMI]).unwrap();
-        assert_eq!(events(&down), [(2, 0x0b, -240), (2, 8, -2)]);
+        assert_eq!(wheel(&down), [vec![(2, 0x0b, -120), (2, 8, -1)], vec![(2, 0x0b, -120), (2, 8, -1)]]);
         let right_up = actions(&scroll(40, -1), &[HDMI]).unwrap();
-        assert_eq!(events(&right_up), [(2, 0x0c, 120), (2, 6, 1), (2, 0x0b, 120), (2, 8, 1)]);
+        assert_eq!(wheel(&right_up), [vec![(2, 0x0c, 120), (2, 6, 1)], vec![(2, 0x0b, 120), (2, 8, 1)]]);
         // A huge value is capped.
         let big = actions(&scroll(0, 1_000_000), &[HDMI]).unwrap();
-        assert_eq!(events(&big), [(2, 0x0b, -120 * 50), (2, 8, -50)]);
+        assert_eq!(wheel(&big), vec![vec![(2, 0x0b, -120), (2, 8, -1)]; 50]);
     }
 
     #[test]
