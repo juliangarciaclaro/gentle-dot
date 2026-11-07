@@ -135,6 +135,13 @@ export interface RotatorOptions {
 	/** How the engine's session files are reached; in server mode as the engine's user (S25.8, B1). */
 	access?: EngineAccess;
 	log?: (line: string) => void;
+	/**
+	 * The memory project the engine saves to, and the daemon's file that records the project the
+	 * chat's session was last rotated for. Engram ties a session to the project it was first
+	 * registered in, so a chat resumed after the project changed would capture no memory: its
+	 * session is replaced once, like an oversized one.
+	 */
+	memoryProject?: { name: string; marker: string };
 }
 
 /**
@@ -166,14 +173,17 @@ export class SessionRotator {
 			const { size } = statSync(file);
 			return size >= limits.bytes || this.compactionsIn(file, size) >= limits.compactions;
 		});
-		if (!over) return false;
+		const moved = this.memoryProjectMoved(file);
+		if (!over && !moved) return false;
 		this.rotating = true;
 		try {
 			const state = (await this.supervisor.request({ type: "get_state" })).data as
 				| { isStreaming?: boolean; isCompacting?: boolean }
 				| undefined;
 			if (state?.isStreaming || state?.isCompacting || !this.options.canRotate()) return false;
-			return await this.rotate(file);
+			const rotated = await this.rotate(file);
+			if (rotated && moved) this.recordMemoryProject();
+			return rotated;
 		} catch (error) {
 			this.log(`rotation failed, the chat stays in ${file}: ${(error as Error).message}`);
 			return false;
@@ -213,6 +223,33 @@ export class SessionRotator {
 		const fresh = this.supervisor.sessionFile;
 		if (fresh && fresh !== file) this.supervisor.linkSessions(fresh, previous);
 		return true;
+	}
+
+	/**
+	 * The memory project changed since the chat's session was last rotated for it. A session
+	 * without messages has nothing to carry over: the project is only recorded.
+	 */
+	private memoryProjectMoved(file: string): boolean {
+		const memory = this.options.memoryProject;
+		if (!memory) return false;
+		const recorded = existsSync(memory.marker) ? readFileSync(memory.marker, "utf8").trim() : undefined;
+		if (recorded === memory.name) return false;
+		const access = this.options.access ?? directAccess;
+		const talked = access(
+			() => existsSync(file) && entries(file, '"message"').some((e) => e.type === "message"),
+		);
+		if (!talked) this.recordMemoryProject();
+		return talked;
+	}
+
+	private recordMemoryProject(): void {
+		const memory = this.options.memoryProject;
+		if (!memory) return;
+		try {
+			writeFileSync(memory.marker, `${memory.name}\n`, { mode: 0o600 });
+		} catch (error) {
+			this.log(`cannot record the memory project in ${memory.marker}: ${(error as Error).message}`);
+		}
 	}
 
 	/** The engine opened the handoff session and its context holds the handoff. */

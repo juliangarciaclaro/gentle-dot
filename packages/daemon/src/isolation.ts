@@ -107,6 +107,9 @@ export function subagentsEnabled(base: NodeJS.ProcessEnv): boolean {
  */
 export const MEMORY_PROJECT = "gentle-dot-assistant";
 
+/** The daemon's file naming the memory project the open chat was last rotated for (see `SessionRotator`). */
+export const MEMORY_PROJECT_FILE = "memory-project";
+
 /** The memory server port of the private memory (`GENTLE_DOT_ENGRAM=private`). */
 export const PRIVATE_ENGRAM_PORT = "7438";
 

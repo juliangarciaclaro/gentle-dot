@@ -208,6 +208,46 @@ describe("rotation guards", () => {
 		}
 	});
 
+	it("rotates a chat with messages once when the memory project changed, then never again", async () => {
+		const file = compactedFile(0);
+		writeFileSync(
+			file,
+			`${JSON.stringify({ type: "message", message: { role: "user", content: "hi" } })}\n`,
+			{
+				flag: "a",
+			},
+		);
+		const marker = join(tempDir(), "memory-project");
+		const { supervisor, requests } = stub(file);
+		const rotator = new SessionRotator(supervisor, {
+			limits: DEFAULT_ROTATION,
+			canRotate: () => true,
+			memoryProject: { name: "gentle-dot-assistant", marker },
+		});
+		expect(await rotator.maybeRotate()).toBe(true);
+		expect(requests).toContain("switch_session");
+		expect(readFileSync(marker, "utf8")).toBe("gentle-dot-assistant\n");
+		requests.length = 0;
+		expect(await rotator.maybeRotate()).toBe(false);
+		expect(requests).toEqual([]);
+
+		writeFileSync(marker, "gentle-dot\n");
+		expect(await rotator.maybeRotate()).toBe(true);
+	});
+
+	it("only records the memory project for a chat without messages", async () => {
+		const marker = join(tempDir(), "memory-project");
+		const { supervisor, requests } = stub(compactedFile(0));
+		const rotator = new SessionRotator(supervisor, {
+			limits: DEFAULT_ROTATION,
+			canRotate: () => true,
+			memoryProject: { name: "gentle-dot-assistant", marker },
+		});
+		expect(await rotator.maybeRotate()).toBe(false);
+		expect(requests).toEqual([]);
+		expect(readFileSync(marker, "utf8")).toBe("gentle-dot-assistant\n");
+	});
+
 	it("does nothing below the limits", async () => {
 		const { supervisor, requests } = stub(compactedFile(2));
 		const rotator = new SessionRotator(supervisor, { limits: DEFAULT_ROTATION, canRotate: () => true });

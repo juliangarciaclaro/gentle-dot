@@ -88,6 +88,8 @@ export interface BridgeOptions {
 	features?: Features;
 	/** When the open session is replaced by a fresh one (docs/design.md §7). */
 	rotation?: RotationLimits;
+	/** The memory project and its marker file: a chat resumed after the project changed is rotated once. */
+	memoryProject?: { name: string; marker: string };
 	/** How many messages `history` and each `get_earlier` page carry. Default 100. */
 	historyPage?: number;
 }
@@ -177,6 +179,7 @@ export class DotBridge {
 			canRotate: () =>
 				supervisor.state === "ready" && !supervisor.busy && this.asks.size === 0 && this.sending === 0,
 			...(options.engineAccess ? { access: options.engineAccess } : {}),
+			...(options.memoryProject ? { memoryProject: options.memoryProject } : {}),
 			log: (line) => this.log(line),
 		});
 		supervisor.onEvent((event) => this.onAgentEvent(event));
@@ -1183,6 +1186,8 @@ export class DotBridge {
 					// The engine knows its model only once it is ready; windows that connected
 					// earlier (for example while it restarted) would show none until they asked.
 					this.broadcastModels();
+					// A chat resumed after the memory project changed moves to a session of the new one.
+					if (this.options.memoryProject) this.rotateWhenIdle();
 				}
 				break;
 			case "interrupted":

@@ -33,6 +33,8 @@ import {
 	ensureMemoryProject,
 	ensurePrivateDir,
 	isolatedAgentEnv,
+	MEMORY_PROJECT,
+	MEMORY_PROJECT_FILE,
 	privateMemory,
 } from "./isolation.ts";
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
@@ -359,6 +361,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(vps ? { engineAccess: access } : {}),
 		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
 		rotation: options.rotation ?? rotationLimits(process.env),
+		memoryProject: { name: MEMORY_PROJECT, marker: join(options.dataDir, MEMORY_PROJECT_FILE) },
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});
 
