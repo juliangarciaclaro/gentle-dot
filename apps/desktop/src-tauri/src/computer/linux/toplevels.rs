@@ -166,12 +166,15 @@ pub fn group_apps(windows: &[WindowInfo], catalog: &Catalog) -> Vec<AppInfo> {
     apps
 }
 
-/// The output a screenshot covers: the one under the last position the pointer was moved to,
-/// else the one with the window in front, else the first.
+/// The output a screenshot covers: the one with the window in front when that is not the window
+/// that was in front at the last pointer move (`front_at_move`; Wayland gives no real pointer, so
+/// the position only says where the assistant last acted), else the one under the pointer, else
+/// the one with the window in front, else the first.
 pub fn output_for_capture<'a>(
     outputs: &'a [OutputInfo],
     pointer: Option<Point>,
     front: Option<&WindowInfo>,
+    front_at_move: Option<u32>,
 ) -> Option<&'a OutputInfo> {
     let under_pointer = pointer.and_then(|at| outputs.iter().find(|o| contains(&o.rect, at)));
     let with_front = || {
@@ -179,6 +182,10 @@ pub fn output_for_capture<'a>(
         let frame = front.frames.first()?;
         outputs.iter().find(|o| o.id == frame.0)
     };
+    let front_changed = front.is_some_and(|f| front_at_move != Some(f.id));
+    if front_changed {
+        return with_front().or(under_pointer).or_else(|| outputs.first());
+    }
     under_pointer.or_else(with_front).or_else(|| outputs.first())
 }
 
@@ -472,13 +479,20 @@ mod tests {
         let outputs = outputs();
         let front = active(window(1, "a", &[(2, rect(0, 0, 100, 100))]));
         let id = |o: Option<&OutputInfo>| o.map(|o| o.id);
-        assert_eq!(id(output_for_capture(&outputs, Some(at(100.0, 100.0)), Some(&front))), Some(1));
-        assert_eq!(id(output_for_capture(&outputs, Some(at(2000.0, 10.0)), None)), Some(2));
+        let same = Some(front.id);
+        assert_eq!(id(output_for_capture(&outputs, Some(at(100.0, 100.0)), Some(&front), same)), Some(1));
+        assert_eq!(id(output_for_capture(&outputs, Some(at(2000.0, 10.0)), None, same)), Some(2));
         // A pointer position on no output (an output went away) falls back.
-        assert_eq!(id(output_for_capture(&outputs, Some(at(9000.0, 0.0)), Some(&front))), Some(2));
-        assert_eq!(id(output_for_capture(&outputs, None, Some(&front))), Some(2));
-        assert_eq!(id(output_for_capture(&outputs, None, None)), Some(1));
-        assert_eq!(id(output_for_capture(&[], None, None)), None);
+        assert_eq!(id(output_for_capture(&outputs, Some(at(9000.0, 0.0)), Some(&front), same)), Some(2));
+        assert_eq!(id(output_for_capture(&outputs, None, Some(&front), None)), Some(2));
+        assert_eq!(id(output_for_capture(&outputs, None, None, None)), Some(1));
+        assert_eq!(id(output_for_capture(&[], None, None, None)), None);
+        // A different window in front than at the last pointer move (or one where none was) wins
+        // over the pointer; no window in front keeps the pointer's output.
+        for before in [Some(7), None] {
+            assert_eq!(id(output_for_capture(&outputs, Some(at(100.0, 100.0)), Some(&front), before)), Some(2));
+        }
+        assert_eq!(id(output_for_capture(&outputs, Some(at(100.0, 100.0)), None, Some(7))), Some(1));
         assert_eq!(id(output_at(&outputs, at(1919.0, 5.0))), Some(1));
         assert_eq!(id(output_at(&outputs, at(1920.0, 5.0))), Some(2));
     }

@@ -108,6 +108,9 @@ pub struct LinuxDesktop {
     /// Held while full desktop control is being turned on, so two calls never open two devices.
     enabling: Mutex<()>,
     last_pointer: Mutex<Option<Point>>,
+    /// The window in front when the pointer was last moved: Wayland gives no real pointer, so a
+    /// different window in front since then says the user (or an app launch) went elsewhere.
+    front_at_move: Mutex<Option<u32>>,
     guard: Mutex<Option<Arc<dyn CaptureGuard>>>,
     /// Accessibility (AT-SPI) for the risk checks.
     atspi: Atspi,
@@ -141,6 +144,7 @@ impl LinuxDesktop {
             pointer: Mutex::new(pointer),
             enabling: Mutex::new(()),
             last_pointer: Mutex::new(None),
+            front_at_move: Mutex::new(None),
             guard: Mutex::new(None),
             atspi: Atspi::default(),
             own_pid: std::process::id() as i32,
@@ -176,9 +180,26 @@ impl LinuxDesktop {
         *self.guard.lock().unwrap_or_else(|p| p.into_inner()) = Some(guard);
     }
 
-    /// Records where the pointer was moved to, which picks the output a screenshot covers.
-    pub fn note_pointer(&self, at: Point) {
+    /// Records where the pointer was moved to and which window was in front, which pick the
+    /// output a screenshot covers.
+    pub fn note_pointer(&self, at: Point, front: Option<u32>) {
         *self.last_pointer.lock().unwrap_or_else(|p| p.into_inner()) = Some(at);
+        *self.front_at_move.lock().unwrap_or_else(|p| p.into_inner()) = front;
+    }
+
+    /// The output a screenshot covers. X11 reports the real pointer, so its window in front never
+    /// counts as changed.
+    fn output_for_capture<'a>(
+        &self,
+        outputs: &'a [toplevels::OutputInfo],
+        windows: &[toplevels::WindowInfo],
+    ) -> Option<&'a toplevels::OutputInfo> {
+        let front = toplevels::frontmost(windows);
+        let front_at_move = match self.x11() {
+            Some(_) => front.map(|f| f.id),
+            None => *self.front_at_move.lock().unwrap_or_else(|p| p.into_inner()),
+        };
+        toplevels::output_for_capture(outputs, self.pointer_position(), front, front_at_move)
     }
 
     fn backend(&self) -> Result<&Backend, String> {
@@ -239,7 +260,7 @@ impl LinuxDesktop {
     /// The frame of the output a screenshot (and the overlay) covers.
     pub fn capture_frame(&self) -> Option<Frame> {
         let (outputs, windows) = self.snapshot().ok()?;
-        let output = toplevels::output_for_capture(&outputs, self.pointer_position(), toplevels::frontmost(&windows))?;
+        let output = self.output_for_capture(&outputs, &windows)?;
         Some(frame_of(&output.rect))
     }
 
@@ -278,12 +299,12 @@ impl LinuxDesktop {
             InputEvent::Key(combo) => self.send_x11(x11, |map| x11::combo_actions(combo, map)),
             InputEvent::Text(text) => self.send_x11(x11, |map| x11::text_actions(text, map)),
             InputEvent::Move(_) | InputEvent::Click { .. } | InputEvent::Drag { .. } | InputEvent::Scroll { .. } => {
-                let (outputs, _) = self.snapshot()?;
+                let (outputs, windows) = self.snapshot()?;
                 let layout: Vec<_> = outputs.iter().map(|output| output.rect).collect();
                 x11.play_pointer(&x11::pointer_actions(event, &layout)?)?;
                 match event {
-                    InputEvent::Move(at) | InputEvent::Click { at, .. } | InputEvent::Scroll { at, .. } => self.note_pointer(*at),
-                    InputEvent::Drag { to, .. } => self.note_pointer(*to),
+                    InputEvent::Move(at) | InputEvent::Click { at, .. } | InputEvent::Scroll { at, .. } => self.note_pointer(*at, toplevels::frontmost(&windows).map(|w| w.id)),
+                    InputEvent::Drag { to, .. } => self.note_pointer(*to, toplevels::frontmost(&windows).map(|w| w.id)),
                     _ => {}
                 }
                 Ok(())
@@ -354,7 +375,7 @@ impl Desktop for LinuxDesktop {
 
     fn capture(&self) -> Result<Capture, String> {
         let (outputs, windows) = self.snapshot()?;
-        let output = toplevels::output_for_capture(&outputs, self.pointer_position(), toplevels::frontmost(&windows))
+        let output = self.output_for_capture(&outputs, &windows)
             .ok_or("no screen is known")?;
         // A session starts with a look at the screen: the toolkits get time to expose themselves.
         self.atspi.enable();
@@ -385,12 +406,12 @@ impl Desktop for LinuxDesktop {
             InputEvent::Text(text) => self.send(typing::text_batches(text)?),
             InputEvent::Move(_) | InputEvent::Click { .. } | InputEvent::Drag { .. } | InputEvent::Scroll { .. } => {
                 let pointer = self.pointer().ok_or(POINTER_OFF)?;
-                let (outputs, _) = self.snapshot()?;
+                let (outputs, windows) = self.snapshot()?;
                 let layout: Vec<_> = outputs.iter().map(|output| output.rect).collect();
                 pointer.post(event, &layout)?;
                 match event {
-                    InputEvent::Move(at) | InputEvent::Click { at, .. } | InputEvent::Scroll { at, .. } => self.note_pointer(*at),
-                    InputEvent::Drag { to, .. } => self.note_pointer(*to),
+                    InputEvent::Move(at) | InputEvent::Click { at, .. } | InputEvent::Scroll { at, .. } => self.note_pointer(*at, toplevels::frontmost(&windows).map(|w| w.id)),
+                    InputEvent::Drag { to, .. } => self.note_pointer(*to, toplevels::frontmost(&windows).map(|w| w.id)),
                     _ => {}
                 }
                 Ok(())
