@@ -392,7 +392,8 @@ describe("connector sign-in", () => {
 		const { manager, store, changes, owner, emit, find, sent, logs, oauth, dataDir } = setup();
 		expect(manager.connect(owner, "notion", emit)).toBeUndefined();
 		expect(store.state().connectors.notion).toEqual({ enabled: true, mode: "read_only" });
-		expect(changes).toEqual([true]);
+		// Turning it on only starts the sign-in; the engine is restarted once, when that sign-in ends.
+		expect(changes).toEqual([false]);
 		const link = await find("auth_event", (m) => linkOf(m) !== "");
 		expect(link.flowId).toMatch(/^connector-/);
 		expect(link.event).toMatchObject({
@@ -407,7 +408,8 @@ describe("connector sign-in", () => {
 		const done = await find("auth_done");
 		expect(done).toEqual({ type: "auth_done", flowId: link.flowId, providerId: "notion", ok: true });
 		expect(manager.list()[0]?.status).toBe("connected");
-		expect(changes).toEqual([true, false]);
+		// The engine reads the new credentials only at its next start, so a finished sign-in restarts it.
+		expect(changes).toEqual([false, true]);
 		const code = pasted.searchParams.get("code") ?? "";
 		expect(logs.join("\n")).not.toContain(code);
 		expect(JSON.stringify(sent)).not.toContain(code);
@@ -477,11 +479,13 @@ describe("connector sign-in", () => {
 	});
 
 	it("reports a failed sign-in in plain words and marks the connector", async () => {
-		const { manager, owner, emit, find, logs } = setup("fail");
+		const { manager, owner, emit, find, logs, changes } = setup("fail");
 		manager.connect(owner, "notion", emit);
 		const done = await find("auth_done");
 		expect(done).toMatchObject({ ok: false, message: "Sign-in did not finish. Please try again." });
 		expect(manager.list()[0]?.status).toBe("error");
+		// Nothing new to read: the failed sign-in only refreshes the statuses.
+		expect(changes).toEqual([false, false]);
 		expect(logs.some((l) => l.includes("sign-in to connector notion failed"))).toBe(true);
 		expect(logs.join("\n")).not.toContain("https://auth.example.com");
 	});
@@ -493,7 +497,7 @@ describe("connector sign-in", () => {
 		});
 		expect(manager.signIn(owner, "notion", emit)).toBeUndefined();
 		expect((await find("auth_done")).ok).toBe(true);
-		expect(changes).toEqual([false]);
+		expect(changes).toEqual([true]);
 		expect(manager.signIn(owner, "atlassian", emit)).toMatchObject({ code: "connector_not_added" });
 		expect(manager.signIn(owner, "nope", emit)).toMatchObject({ code: "unknown_connector" });
 	});
@@ -505,7 +509,7 @@ describe("connector sign-in", () => {
 		expect(manager.setMode("notion", "read_write")).toBeUndefined();
 		expect(manager.disconnect("notion")).toBeUndefined();
 		expect(manager.list()[0]).toMatchObject({ added: true, enabled: false, status: "off" });
-		expect(changes).toEqual([true, false, true, true]);
+		expect(changes).toEqual([false, true, true, true]);
 		// Turning it on again needs no new sign-in; the window still hears that it is done.
 		const before = sent.length;
 		expect(manager.connect(owner, "notion", emit)).toBeUndefined();
@@ -522,7 +526,7 @@ describe("connector sign-in", () => {
 		expect(store.state().connectors).toEqual({});
 		expect(JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8"))).toEqual({ mcpServers: {} });
 		expect(manager.list()[0]).toMatchObject({ added: false, status: "off" });
-		expect(changes).toEqual([true, false, true, true, true]);
+		expect(changes).toEqual([false, true, true, true, true]);
 		expect(manager.setMode("notion", "read_only")).toMatchObject({ code: "connector_not_added" });
 		expect(await manager.remove("nope")).toMatchObject({ code: "unknown_connector" });
 	});

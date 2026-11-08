@@ -95,8 +95,8 @@ Client to daemon:
 | `auth_reply` | `flowId`, `value` \| `cancelled` | answers the flow's current prompt |
 | `auth_logout` | `providerId` | daemon `ModelRuntime.logout()` |
 | `connectors_list` | — | daemon `connectors.json` (each sign-in is a reference to its item in the app's secure store) |
-| `connector_connect` | `connectorId` | adds or turns on the connector (new `mcp.json`, agent restart when idle), then the daemon's OAuth sign-in when not signed in |
-| `connector_signin` | `connectorId` | the daemon's OAuth sign-in (pi-mcp); one flow at a time |
+| `connector_connect` | `connectorId` | adds or turns on the connector (new `mcp.json`); agent restart when idle, right away when it is signed in, else once the daemon's OAuth sign-in ends signed in |
+| `connector_signin` | `connectorId` | the daemon's OAuth sign-in (pi-mcp); one flow at a time; agent restart when idle once it ends signed in, so the assistant sees the connector without Restart assistant |
 | `connector_disconnect` | `connectorId` | turns it off (the sign-in stays); agent restart when idle |
 | `connector_mode` | `connectorId`, `mode` (`read_only` \| `read_write`) | new `mcp.json`; agent restart when idle |
 | `connector_remove` | `connectorId` | `mcp logout <id>`, then forgets it; agent restart when idle |
