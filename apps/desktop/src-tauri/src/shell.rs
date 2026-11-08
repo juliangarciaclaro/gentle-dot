@@ -1129,15 +1129,24 @@ fn end_computer_control(app: &AppHandle) {
 
 /// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
 fn handle_launch(app: &AppHandle, args: &[String]) {
-    let result = match platform::launch_request(args) {
-        LaunchRequest::Toggle => toggle_panel(app.clone()),
-        LaunchRequest::Panic => {
-            end_computer_control(app);
-            Ok(())
+    let request = platform::launch_request(args);
+    if request == LaunchRequest::Panic {
+        end_computer_control(app);
+        return;
+    }
+    // A second launch arrives on the single-instance D-Bus thread, and the panel's windows (GTK, the
+    // layer shell) work only on the main thread: there `--toggle` panicked and hung (T15v).
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        let result = match request {
+            LaunchRequest::Toggle => toggle_panel(handle.clone()),
+            _ => show_panel(&handle),
+        };
+        if let Err(error) = result {
+            eprintln!("gentle-dot: cannot show the panel: {error}");
         }
-        LaunchRequest::Show => show_panel(app),
-    };
-    if let Err(error) = result {
+    });
+    if let Err(error) = queued {
         eprintln!("gentle-dot: cannot show the panel: {error}");
     }
 }
