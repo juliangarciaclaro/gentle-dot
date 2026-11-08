@@ -42,7 +42,7 @@ type Rec = Record<string, unknown>;
 /** An MCP server behind an in-memory transport: every request it got, and how often it was closed. */
 function memoryUpstream() {
 	const requests: { method: string; params: Rec }[] = [];
-	const state = { closed: 0, connects: 0, dropNext: false };
+	const state = { closed: 0, connects: 0, dropNext: false, listDelayMs: 0 };
 	const answer = (method: string, params: Rec): { result?: unknown; error?: Rec } => {
 		switch (method) {
 			case "initialize":
@@ -87,11 +87,17 @@ function memoryUpstream() {
 				void server.close();
 				return;
 			}
-			void server.send({
-				jsonrpc: "2.0",
-				id: message.id,
-				...answer(message.method, params),
-			} as JsonRpcMessage);
+			// A late answer may find the connection already closed.
+			const send = () =>
+				server
+					.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						...answer(message.method, params),
+					} as JsonRpcMessage)
+					.catch(() => undefined);
+			if (state.listDelayMs > 0 && message.method === "tools/list") setTimeout(send, state.listDelayMs);
+			else send();
 		});
 		void server.start();
 		return client;
@@ -119,7 +125,14 @@ const clients: McpClient[] = [];
 afterEach(async () => {
 	await Promise.all(clients.splice(0).map((c) => c.close().catch(() => undefined)));
 	await Promise.all(proxies.splice(0).map((p) => p.close()));
-	await Promise.all(servers.splice(0).map((s) => new Promise((done) => s.close(done))));
+	await Promise.all(
+		servers.splice(0).map((s) => {
+			// A request the client cut can leave its keep-alive socket open.
+			const closed = new Promise((done) => s.close(done));
+			s.closeAllConnections();
+			return closed;
+		}),
+	);
 });
 
 async function listen(handler: (req: IncomingMessage, res: import("node:http").ServerResponse) => void) {
@@ -378,6 +391,31 @@ describe("MCP proxy: upstream connections", () => {
 		expect(await client.callTool("search", {})).toMatchObject({ content: [{ text: "ran search" }] });
 		expect(upstream.state.connects).toBe(2);
 		expect(logs.join("\n")).not.toContain("Bearer");
+	});
+
+	it("keeps the upstream for other requests when the engine gives up on one", async () => {
+		// An engine start switches sessions: the first session's requests are cut while the next
+		// session's are already on the same upstream.
+		const { post, key, base, upstream, logs } = await setup();
+		upstream.state.listDelayMs = 150;
+		const auth = { authorization: `Bearer ${key}` };
+		const cut = new AbortController();
+		const first = fetch(`${base}/mcp/notes`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...auth },
+			body: JSON.stringify(rpc("tools/list")),
+			signal: cut.signal,
+		}).catch(() => undefined);
+		await new Promise((done) => setTimeout(done, 30));
+		const second = post("/mcp/notes", rpc("tools/list"), auth);
+		await new Promise((done) => setTimeout(done, 30));
+		cut.abort();
+		await first;
+		const answer = (await (await second).json()) as { result?: { tools: Tool[] }; error?: Rec };
+		expect(answer.error).toBeUndefined();
+		expect(answer.result?.tools.map((tool) => tool.name)).toEqual(["search", "explode"]);
+		expect([upstream.state.connects, upstream.state.closed]).toEqual([1, 0]);
+		expect(logs.join("\n")).not.toContain("could not reach");
 	});
 
 	it("tells the model why the secret store is unavailable and keeps the reason in the log", async () => {

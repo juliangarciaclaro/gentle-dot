@@ -215,7 +215,7 @@ export class McpProxy {
 			);
 			this.reply(req, res, 200, rpcId, { result });
 		} catch (error) {
-			this.reply(req, res, 200, rpcId, { error: this.rpcError(connector, error) });
+			this.reply(req, res, 200, rpcId, { error: this.rpcError(connector, error, controller.signal) });
 		} finally {
 			if (this.running.get(key) === controller) this.running.delete(key);
 		}
@@ -425,8 +425,15 @@ export class McpProxy {
 		void upstream.client.close().catch(() => {});
 	}
 
-	private rpcError(connector: ProxiedConnector, error: unknown): { code: number; message: string } {
+	private rpcError(
+		connector: ProxiedConnector,
+		error: unknown,
+		signal: AbortSignal,
+	): { code: number; message: string } {
 		if (error instanceof ProxyError) return { code: error.code, message: error.message };
+		// The engine gave up on this request (an engine start switches sessions and cuts the first
+		// one's): the upstream is fine and other requests share it, so it stays.
+		if (signal.aborted) return { code: REFUSED, message: "The request was cancelled. Nothing was sent." };
 		if (error instanceof SecretsUnavailableError) {
 			if (error.message !== NO_APP)
 				this.log(`connector ${connector.id} cannot get its secrets: ${error.message}`);
