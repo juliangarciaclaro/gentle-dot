@@ -82,7 +82,9 @@ fn within_capped<T: Send + 'static>(
         .name("computer-portal".into())
         .spawn(move || {
             let _wait = wait;
-            let outcome = work();
+            // A panic still hands the caller an answer, so it does not wait out the whole limit.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .unwrap_or_else(|_| Err("the screenshot portal request failed".to_string()));
             let (state, ready) = &*shared;
             let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
             if matches!(*state, Slot::GaveUp) {
@@ -267,5 +269,14 @@ mod tests {
         assert!(refused.unwrap_err().contains("busy"));
         release.send(()).unwrap();
         release.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_panicking_worker_fails_at_once_instead_of_waiting_out_the_limit() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let started = Instant::now();
+        let result = within_capped::<()>(2, Duration::from_secs(5), || panic!("portal reply was malformed"), drop);
+        assert!(started.elapsed() < Duration::from_secs(1), "waited {:?}", started.elapsed());
+        assert_eq!(result.unwrap_err(), "the screenshot portal request failed");
     }
 }
