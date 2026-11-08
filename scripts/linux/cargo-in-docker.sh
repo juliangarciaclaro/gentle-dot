@@ -14,6 +14,7 @@ exec docker run --rm --platform "linux/${ARCH}" \
 	-v "gentle-dot-linux-${ARCH}-check-target:/work/apps/desktop/src-tauri/target" \
 	"gentle-dot-linux-check:${ARCH}" \
 	bash -euc '
+		set -o pipefail
 		cd /src
 		git ls-files -z --cached --others --exclude-standard -- . ":!:.codegraph" ":!:.atl" |
 			tar --null --files-from=- --ignore-failed-read -cf - 2>/dev/null | tar -xf - -C /work
