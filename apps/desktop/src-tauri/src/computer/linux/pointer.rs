@@ -40,7 +40,7 @@ pub const DRAG_LEAD: f64 = 16.0;
 /// The motions spread over the rest of a drag, after the lead.
 const DRAG_STEPS: usize = 8;
 /// The wait after a drag's first motion: apps start their drag only once they see it, and only
-/// motions after that reach the drop target (L70 of odd/tasks/linux-parity.md).
+/// motions after that reach the drop target (measured on COSMIC).
 pub const DRAG_START: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Rect {
